@@ -12,11 +12,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -33,6 +40,9 @@ import com.example.model.AnnotationStroke
 import com.example.model.InteractionTool
 import com.example.model.LaserPointerState
 import com.example.model.NormalizedPoint
+import com.example.model.PdfSlideLink
+import com.example.ui.theme.SkyCyan
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -44,10 +54,13 @@ fun StageSlideCanvas(
     activeStroke: AnnotationStroke?,
     laserState: LaserPointerState,
     activeTool: InteractionTool,
+    links: List<PdfSlideLink> = emptyList(),
+    showLinkHints: Boolean = true,
     isBlackoutOverlay: Boolean = false,
     interactive: Boolean = true,
     onNextSlide: () -> Unit = {},
     onPreviousSlide: () -> Unit = {},
+    onLinkClick: (PdfSlideLink) -> Unit = {},
     onLaserMove: (NormalizedPoint) -> Unit = {},
     onLaserEnd: () -> Unit = {},
     onStrokeStart: (NormalizedPoint) -> Unit = {},
@@ -57,6 +70,15 @@ fun StageSlideCanvas(
 ) {
     val latestTool = rememberUpdatedState(activeTool)
     val latestBitmap = rememberUpdatedState(slideBitmap)
+    val latestLinks = rememberUpdatedState(links)
+    var tappedLinkId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(tappedLinkId) {
+        if (tappedLinkId != null) {
+            delay(260L)
+            tappedLinkId = null
+        }
+    }
 
     BoxWithConstraints(
         modifier = modifier
@@ -138,9 +160,19 @@ fun StageSlideCanvas(
                                     if (abs(dx) > 64f && abs(dx) > abs(dy) * 1.2f) {
                                         if (dx < 0f) onNextSlide() else onPreviousSlide()
                                     } else if (abs(dx) < 20f && abs(dy) < 20f) {
-                                        if (startPos.x < boxW * 0.28f) {
+                                        val tapNorm = toNormalizedPoint(startPos, slideRect)
+                                        val hitLink = if (tapNorm != null) {
+                                            latestLinks.value.firstOrNull { link ->
+                                                link.bounds.any { it.contains(tapNorm.x, tapNorm.y, slop = 0.018f) }
+                                            }
+                                        } else null
+
+                                        if (hitLink != null) {
+                                            tappedLinkId = hitLink.id
+                                            onLinkClick(hitLink)
+                                        } else if (startPos.x < boxW * 0.22f) {
                                             onPreviousSlide()
-                                        } else if (startPos.x > boxW * 0.72f) {
+                                        } else if (startPos.x > boxW * 0.78f) {
                                             onNextSlide()
                                         }
                                     }
@@ -176,6 +208,35 @@ fun StageSlideCanvas(
                         dstOffset = IntOffset(slideRect.left.roundToInt(), slideRect.top.roundToInt()),
                         dstSize = IntSize(slideRect.width.roundToInt().coerceAtLeast(1), slideRect.height.roundToInt().coerceAtLeast(1))
                     )
+
+                    // Render subtle device-only link hints when Navigate mode is active
+                    if (interactive && activeTool == InteractionTool.NAVIGATE && (showLinkHints || tappedLinkId != null)) {
+                        for (link in links) {
+                            val isFlashing = link.id == tappedLinkId
+                            if (!showLinkHints && !isFlashing) continue
+                            val fillColor = if (isFlashing) SkyCyan.copy(alpha = 0.34f) else SkyCyan.copy(alpha = 0.09f)
+                            val borderColor = if (isFlashing) SkyCyan else SkyCyan.copy(alpha = 0.42f)
+                            for (b in link.bounds) {
+                                val rectLeft = slideRect.left + b.left * slideRect.width
+                                val rectTop = slideRect.top + b.top * slideRect.height
+                                val rectW = ((b.right - b.left) * slideRect.width).coerceAtLeast(4f)
+                                val rectH = ((b.bottom - b.top) * slideRect.height).coerceAtLeast(4f)
+                                drawRoundRect(
+                                    color = fillColor,
+                                    topLeft = Offset(rectLeft, rectTop),
+                                    size = Size(rectW, rectH),
+                                    cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+                                )
+                                drawRoundRect(
+                                    color = borderColor,
+                                    topLeft = Offset(rectLeft, rectTop),
+                                    size = Size(rectW, rectH),
+                                    cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                                    style = Stroke(width = if (isFlashing) 2.dp.toPx() else 1.dp.toPx())
+                                )
+                            }
+                        }
+                    }
 
                     // Render synchronized annotations
                     for (stroke in allStrokes) {

@@ -91,8 +91,34 @@ data class UserPreferences(
     val showTimerBar: Boolean = true
 )
 
+@Serializable
+data class NormalizedRect(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    fun contains(x: Float, y: Float, slop: Float = 0.018f): Boolean {
+        return x >= (left - slop) && x <= (right + slop) &&
+            y >= (top - slop) && y <= (bottom + slop)
+    }
+}
+
+sealed interface PdfLinkAction {
+    data class GoToPage(val pageIndex: Int) : PdfLinkAction
+    data class OpenUri(val uri: String) : PdfLinkAction
+}
+
+data class PdfSlideLink(
+    val id: String,
+    val bounds: List<NormalizedRect>,
+    val action: PdfLinkAction
+)
+
 data class SlideBitmapPair(
     val slideBitmap: Bitmap?,
     val beamerNotesBitmap: Bitmap?,
-    val effectiveLayout: BeamerLayoutMode
+    val effectiveLayout: BeamerLayoutMode,
+    val links: List<PdfSlideLink> = emptyList()
 )
+

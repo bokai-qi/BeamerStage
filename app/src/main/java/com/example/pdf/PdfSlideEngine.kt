@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
 import com.example.model.BeamerLayoutMode
+import com.example.model.PdfSlideLink
 import com.example.model.SlideBitmapPair
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -24,11 +25,15 @@ class PdfSlideEngine(private val context: Context) {
     private var fileDescriptor: ParcelFileDescriptor? = null
     private var pdfRenderer: PdfRenderer? = null
     private var detectedDefaultLayout: BeamerLayoutMode = BeamerLayoutMode.SINGLE
+    private var cachedRawLinksUri: String? = null
+    private var cachedRawLinksByPage: Map<Int, List<PdfLinkExtractor.RawPageLink>> = emptyMap()
 
     // 32 MB LRU Bitmap Cache for crisp instant slide changes & thumbnails
     private val bitmapCache = object : LruCache<String, Bitmap>(32 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
+
+    private val linksCache = LruCache<String, List<PdfSlideLink>>(256)
 
     suspend fun openDocument(uriString: String): Int = withContext(Dispatchers.IO) {
         renderMutex.withLock {
@@ -98,14 +103,19 @@ class PdfSlideEngine(private val context: Context) {
 
             val slideKey = "$uriString:$pageIndex:${effectiveMode.name}:slide:$targetSlideWidthPx"
             val notesKey = "$uriString:$pageIndex:${effectiveMode.name}:notes:${targetSlideWidthPx / 2}"
+            val linksKey = "$uriString:$pageIndex:${effectiveMode.name}:links"
 
             val cachedSlide = bitmapCache.get(slideKey)
             val cachedNotes = if (includeNotesBitmap && effectiveMode != BeamerLayoutMode.SINGLE) {
                 bitmapCache.get(notesKey)
             } else null
+            val cachedLinks = linksCache.get(linksKey)
 
-            if (cachedSlide != null && (!includeNotesBitmap || effectiveMode == BeamerLayoutMode.SINGLE || cachedNotes != null)) {
-                return@withLock SlideBitmapPair(cachedSlide, cachedNotes, effectiveMode)
+            if (cachedSlide != null &&
+                cachedLinks != null &&
+                (!includeNotesBitmap || effectiveMode == BeamerLayoutMode.SINGLE || cachedNotes != null)
+            ) {
+                return@withLock SlideBitmapPair(cachedSlide, cachedNotes, effectiveMode, cachedLinks)
             }
 
             renderer.openPage(pageIndex).use { page ->
@@ -133,7 +143,10 @@ class PdfSlideEngine(private val context: Context) {
                     null
                 }
 
-                SlideBitmapPair(slideBmp, notesBmp, effectiveMode)
+                val links = cachedLinks ?: extractLinksLocked(uriString, page, pageIndex, effectiveMode)
+                    .also { linksCache.put(linksKey, it) }
+
+                SlideBitmapPair(slideBmp, notesBmp, effectiveMode, links)
             }
         }
     }
@@ -197,12 +210,49 @@ class PdfSlideEngine(private val context: Context) {
         }
     }
 
+    private fun extractLinksLocked(
+        uriString: String,
+        page: PdfRenderer.Page,
+        pageIndex: Int,
+        effectiveLayout: BeamerLayoutMode
+    ): List<PdfSlideLink> {
+        val platformLinks = PdfLinkExtractor.extractFromPlatformPage(page, effectiveLayout)
+        if (platformLinks.isNotEmpty()) {
+            return platformLinks
+        }
+        if (cachedRawLinksUri != uriString) {
+            val bytes = readPdfBytes(uriString)
+            cachedRawLinksByPage = if (bytes != null) {
+                runCatching { PdfLinkExtractor.extractLinksFromPdfBytes(bytes) }
+                    .getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
+            cachedRawLinksUri = uriString
+        }
+        val rawForPage = cachedRawLinksByPage[pageIndex].orEmpty()
+        return PdfLinkExtractor.mapRawLinksToSlide(pageIndex, rawForPage, effectiveLayout)
+    }
+
+    private fun readPdfBytes(uriString: String): ByteArray? {
+        return runCatching {
+            val uri = Uri.parse(uriString)
+            if (uri.scheme == "file") {
+                File(uri.path ?: return null).readBytes()
+            } else {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }
+        }.getOrNull()
+    }
+
     private fun closeLocked() {
         runCatching { pdfRenderer?.close() }
         runCatching { fileDescriptor?.close() }
         pdfRenderer = null
         fileDescriptor = null
         currentUriString = null
+        cachedRawLinksUri = null
+        cachedRawLinksByPage = emptyMap()
     }
 
     private fun openParcelFileDescriptor(uriString: String): ParcelFileDescriptor? {

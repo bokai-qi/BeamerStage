@@ -16,9 +16,12 @@ import com.example.model.InteractionTool
 import com.example.model.LaserColor
 import com.example.model.LaserPointerState
 import com.example.model.NormalizedPoint
+import com.example.model.PdfLinkAction
+import com.example.model.PdfSlideLink
 import com.example.model.PenColor
 import com.example.model.UserPreferences
 import com.example.pdf.PdfSlideEngine
+import kotlin.math.abs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,7 +59,11 @@ data class PresenterUiState(
     val isTimerRunning: Boolean = false,
     val targetMinutes: Int = 15,
     val preferences: UserPreferences = UserPreferences(),
-    val slideGridThumbnails: Map<Int, Bitmap?> = emptyMap()
+    val slideGridThumbnails: Map<Int, Bitmap?> = emptyMap(),
+    val currentSlideLinks: List<PdfSlideLink> = emptyList(),
+    val showLinkHints: Boolean = true,
+    val jumpBackPageIndex: Int? = null,
+    val pendingExternalUri: String? = null
 ) {
     val projectedBitmap: Bitmap?
         get() = if (isFrozen) frozenSlideBitmap else currentSlideBitmap
@@ -204,6 +211,42 @@ class PresenterViewModel(
         if (state.currentPageIndex > 0) {
             goToSlide(state.currentPageIndex - 1)
         }
+    }
+
+    fun onPdfLinkClicked(link: PdfSlideLink) {
+        when (val action = link.action) {
+            is PdfLinkAction.GoToPage -> {
+                val current = _uiState.value.currentPageIndex
+                if (action.pageIndex == current) return
+                if (abs(action.pageIndex - current) > 1) {
+                    _uiState.update { it.copy(jumpBackPageIndex = current) }
+                } else if (_uiState.value.jumpBackPageIndex == action.pageIndex) {
+                    _uiState.update { it.copy(jumpBackPageIndex = null) }
+                }
+                goToSlide(action.pageIndex)
+            }
+            is PdfLinkAction.OpenUri -> {
+                _uiState.update { it.copy(pendingExternalUri = action.uri) }
+            }
+        }
+    }
+
+    fun returnFromJump() {
+        val target = _uiState.value.jumpBackPageIndex ?: return
+        _uiState.update { it.copy(jumpBackPageIndex = null) }
+        goToSlide(target)
+    }
+
+    fun dismissJumpBack() {
+        _uiState.update { it.copy(jumpBackPageIndex = null) }
+    }
+
+    fun toggleLinkHints() {
+        _uiState.update { it.copy(showLinkHints = !it.showLinkHints) }
+    }
+
+    fun dismissExternalUri() {
+        _uiState.update { it.copy(pendingExternalUri = null) }
     }
 
     fun setLayoutMode(mode: BeamerLayoutMode) {
@@ -478,6 +521,7 @@ class PresenterViewModel(
                     currentSlideBitmap = currentPair?.slideBitmap ?: current.currentSlideBitmap,
                     beamerNotesBitmap = currentPair?.beamerNotesBitmap,
                     effectiveLayoutMode = currentPair?.effectiveLayout ?: current.effectiveLayoutMode,
+                    currentSlideLinks = currentPair?.links ?: emptyList(),
                     nextSlideBitmap = nextBmp
                 )
             }

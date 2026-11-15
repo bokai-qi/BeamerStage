@@ -29,53 +29,57 @@ class SampleBeamerGenerator(
     suspend fun ensureSamplesSeeded() = withContext(Dispatchers.IO) {
         val samplesDir = File(context.filesDir, "samples").apply { mkdirs() }
 
-        val standardFile = File(samplesDir, "spectral_graph_theory.pdf")
+        val standardFile = File(samplesDir, "spectral_graph_theory_v2.pdf")
         if (!standardFile.exists()) {
             createStandardBeamerPdf(standardFile)
         }
-        if (repository.getDeckById(SAMPLE_STANDARD_ID) == null) {
+        val existingStandard = repository.getDeckById(SAMPLE_STANDARD_ID)
+        if (existingStandard == null || existingStandard.uriString != standardFile.toURI().toString()) {
             repository.upsertDeck(
                 DeckEntity(
                     id = SAMPLE_STANDARD_ID,
                     uriString = standardFile.toURI().toString(),
                     title = "Spectral Graph Theory (Beamer)",
                     pageCount = 6,
-                    lastPageIndex = 0,
-                    layoutModeName = BeamerLayoutMode.SINGLE.name,
-                    targetDurationMinutes = 15,
+                    lastPageIndex = existingStandard?.lastPageIndex ?: 0,
+                    layoutModeName = existingStandard?.layoutModeName ?: BeamerLayoutMode.SINGLE.name,
+                    targetDurationMinutes = existingStandard?.targetDurationMinutes ?: 15,
                     isBundledSample = true,
-                    lastOpenedAt = System.currentTimeMillis()
+                    lastOpenedAt = existingStandard?.lastOpenedAt ?: System.currentTimeMillis()
                 )
             )
-            val notes = listOf(
-                "Welcome everyone! Today we explore how eigenvalues of the graph Laplacian reveal global connectivity, bottlenecks, and clustering structure.",
-                "Highlight the normalization factor D^{-1/2} on the slide. Point with the crimson laser to the degree diagonal entries before moving to Cheeger's inequality.",
-                "Walk slowly through the Cheeger inequality: λ₂ bounds the expansion ratio h(G) from both sides. Emphasize why spectral clustering works on sparse graphs.",
-                "Use the Pen tool to circle the Fiedler vector sign-cut across the bridge edge between cluster A and cluster B.",
-                "Compare runtime complexity: power iteration converges in O(m / gap) steps, making it practical for million-node networks.",
-                "Thank the audience and open for Q&A. Keep Freeze active if someone asks to revisit Slide 3's theorem while you check your backup slides."
-            )
-            notes.forEachIndexed { idx, text ->
-                repository.saveSlideNote(SAMPLE_STANDARD_ID, idx, text)
+            if (existingStandard == null) {
+                val notes = listOf(
+                    "Welcome everyone! Today we explore how eigenvalues of the graph Laplacian reveal global connectivity, bottlenecks, and clustering structure. Try tapping any Agenda button on Slide 1 to jump directly!",
+                    "Highlight the normalization factor D^{-1/2} on the slide. Point with the crimson laser to the degree diagonal entries before moving to Cheeger's inequality.",
+                    "Walk slowly through the Cheeger inequality: λ₂ bounds the expansion ratio h(G) from both sides. You can tap 'See Spectrum Plot' on the slide to jump straight to Slide 5.",
+                    "Use the Pen tool to circle the Fiedler vector sign-cut across the bridge edge between cluster A and cluster B.",
+                    "Compare runtime complexity: power iteration converges in O(m / gap) steps. Tap 'Back to Cheeger' button to return to the theorem.",
+                    "Thank the audience and open for Q&A. Keep Freeze active if someone asks to revisit Slide 3's theorem while you check your backup slides."
+                )
+                notes.forEachIndexed { idx, text ->
+                    repository.saveSlideNote(SAMPLE_STANDARD_ID, idx, text)
+                }
             }
         }
 
-        val splitFile = File(samplesDir, "beamer_split_notes_demo.pdf")
+        val splitFile = File(samplesDir, "beamer_split_notes_demo_v2.pdf")
         if (!splitFile.exists()) {
             createSplitNotesBeamerPdf(splitFile)
         }
-        if (repository.getDeckById(SAMPLE_SPLIT_ID) == null) {
+        val existingSplit = repository.getDeckById(SAMPLE_SPLIT_ID)
+        if (existingSplit == null || existingSplit.uriString != splitFile.toURI().toString()) {
             repository.upsertDeck(
                 DeckEntity(
                     id = SAMPLE_SPLIT_ID,
                     uriString = splitFile.toURI().toString(),
                     title = "Dual-Screen Beamer Notes Demo",
                     pageCount = 4,
-                    lastPageIndex = 0,
-                    layoutModeName = BeamerLayoutMode.AUTO.name,
-                    targetDurationMinutes = 10,
+                    lastPageIndex = existingSplit?.lastPageIndex ?: 0,
+                    layoutModeName = existingSplit?.layoutModeName ?: BeamerLayoutMode.AUTO.name,
+                    targetDurationMinutes = existingSplit?.targetDurationMinutes ?: 10,
                     isBundledSample = true,
-                    lastOpenedAt = System.currentTimeMillis() - 1000L
+                    lastOpenedAt = existingSplit?.lastOpenedAt ?: (System.currentTimeMillis() - 1000L)
                 )
             )
         }
@@ -86,33 +90,64 @@ class SampleBeamerGenerator(
         val width = 960
         val height = 540
 
+        val linksByPage = mutableMapOf<Int, MutableList<PdfLinkAnnotator.SampleLinkSpec>>()
+        fun addLink(pageIdx: Int, rect: RectF, target: PdfLinkAnnotator.SampleLinkTarget) {
+            linksByPage.getOrPut(pageIdx) { mutableListOf() }
+                .add(PdfLinkAnnotator.SampleLinkSpec(rect.left, rect.top, rect.right, rect.bottom, target))
+        }
+
         drawStandardSlide(pdf, 1, width, height) { canvas ->
             drawBeamerHeader(canvas, width, "Colloquium · Applied Mathematics", 1, 6)
             val titleBg = Paint().apply { color = Color.rgb(22, 33, 62) }
-            canvas.drawRoundRect(RectF(64f, 110f, width - 64f, 270f), 14f, 14f, titleBg)
+            canvas.drawRoundRect(RectF(64f, 102f, width - 64f, 248f), 14f, 14f, titleBg)
 
             val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.WHITE
                 textSize = 38f
                 typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
             }
-            canvas.drawText("Spectral Graph Theory", 96f, 178f, titlePaint)
+            canvas.drawText("Spectral Graph Theory", 96f, 166f, titlePaint)
 
             val subtitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.rgb(147, 197, 253)
                 textSize = 21f
                 typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
             }
-            canvas.drawText("Laplacian Eigenvalues, Cheeger Bounds & Partitioning", 96f, 222f, subtitlePaint)
+            canvas.drawText("Laplacian Eigenvalues, Cheeger Bounds & Partitioning", 96f, 208f, subtitlePaint)
 
             val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.rgb(51, 65, 85)
-                textSize = 18f
+                textSize = 17f
                 typeface = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
             }
-            canvas.drawText("Prof. E. Noether · Department of Mathematics", 96f, 340f, metaPaint)
-            canvas.drawText("Compiled with LaTeX Beamer · 16:9 Widescreen", 96f, 376f, metaPaint)
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "1 / 6")
+            canvas.drawText("Prof. E. Noether · Department of Mathematics", 68f, 286f, metaPaint)
+
+            val agendaTitle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(30, 58, 138)
+                textSize = 15f
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            }
+            canvas.drawText("INTERACTIVE BEAMER SECTIONS (TAP TO JUMP):", 68f, 326f, agendaTitle)
+
+            val tocItems = listOf(
+                "1. Laplacian →" to 1,
+                "2. Cheeger →" to 2,
+                "3. Fiedler Cut →" to 3,
+                "4. Spectrum →" to 4,
+                "Summary →" to 5
+            )
+            var chipX = 68f
+            val chipTop = 342f
+            val chipBottom = 384f
+            tocItems.forEach { (label, targetIdx) ->
+                val rect = drawBeamerButton(canvas, chipX, chipTop, label, chipBottom - chipTop)
+                addLink(0, rect, PdfLinkAnnotator.SampleLinkTarget.GoToPage(targetIdx))
+                chipX = rect.right + 12f
+            }
+
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "1 / 6", 0, 6) { rect, target ->
+                addLink(0, rect, target)
+            }
         }
 
         drawStandardSlide(pdf, 2, width, height) { canvas ->
@@ -130,7 +165,11 @@ class SampleBeamerGenerator(
                 width = width
             )
             drawBullet(canvas, 70f, 395f, "All eigenvalues are real and bounded:  0 = λ₁ ≤ λ₂ ≤ … ≤ λₙ ≤ 2.")
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "2 / 6")
+            val btnRect = drawBeamerButton(canvas, 68f, 430f, "↩ Agenda (Slide 1)", 36f)
+            addLink(1, btnRect, PdfLinkAnnotator.SampleLinkTarget.GoToPage(0))
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "2 / 6", 1, 6) { rect, target ->
+                addLink(1, rect, target)
+            }
         }
 
         drawStandardSlide(pdf, 3, width, height) { canvas ->
@@ -149,7 +188,11 @@ class SampleBeamerGenerator(
             drawBullet(canvas, 70f, 320f, "λ₂ = 0  if and only if G has at least two connected components.")
             drawBullet(canvas, 70f, 365f, "Large spectral gap λ₂ guarantees rapid mixing of random walks.")
             drawBullet(canvas, 70f, 410f, "Provides a provable O(√λ₂) approximation to the NP-hard Sparsest Cut.")
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "3 / 6")
+            val gotoRect = drawBeamerButton(canvas, 68f, 434f, "See Spectrum Plot (Slide 5) →", 36f)
+            addLink(2, gotoRect, PdfLinkAnnotator.SampleLinkTarget.GoToPage(4))
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "3 / 6", 2, 6) { rect, target ->
+                addLink(2, rect, target)
+            }
         }
 
         drawStandardSlide(pdf, 4, width, height) { canvas ->
@@ -165,7 +208,11 @@ class SampleBeamerGenerator(
                 typeface = Typeface.create(Typeface.SERIF, Typeface.ITALIC)
             }
             canvas.drawText("   sparse inter-cluster bridges.", 530f, 335f, notePaint)
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "4 / 6")
+            val gotoCheeger = drawBeamerButton(canvas, 530f, 382f, "↩ Revisit Cheeger Bound", 36f)
+            addLink(3, gotoCheeger, PdfLinkAnnotator.SampleLinkTarget.GoToPage(2))
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "4 / 6", 3, 6) { rect, target ->
+                addLink(3, rect, target)
+            }
         }
 
         drawStandardSlide(pdf, 5, width, height) { canvas ->
@@ -184,7 +231,11 @@ class SampleBeamerGenerator(
                 left = 635f,
                 right = width - 55f
             )
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "5 / 6")
+            val backBtn = drawBeamerButton(canvas, 635f, 355f, "↩ Back to Cheeger (Slide 3)", 36f)
+            addLink(4, backBtn, PdfLinkAnnotator.SampleLinkTarget.GoToPage(2))
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "5 / 6", 4, 6) { rect, target ->
+                addLink(4, rect, target)
+            }
         }
 
         drawStandardSlide(pdf, 6, width, height) { canvas ->
@@ -197,14 +248,19 @@ class SampleBeamerGenerator(
                 textSize = 30f
                 typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
             }
-            canvas.drawText("Thank you — Questions?", 70f, 355f, thanksPaint)
-            drawBeamerFooter(canvas, width, height, "Spectral Graph Theory", "6 / 6")
+            canvas.drawText("Thank you — Questions?", 70f, 335f, thanksPaint)
+            val backAgenda = drawBeamerButton(canvas, 70f, 385f, "↩ Return to Title & Agenda", 38f)
+            addLink(5, backAgenda, PdfLinkAnnotator.SampleLinkTarget.GoToPage(0))
+            drawBeamerFooterWithNav(canvas, width, height, "Spectral Graph Theory", "6 / 6", 5, 6) { rect, target ->
+                addLink(5, rect, target)
+            }
         }
 
         FileOutputStream(outputFile).use { fos ->
             pdf.writeTo(fos)
         }
         pdf.close()
+        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), linksByPage)
     }
 
     private fun createSplitNotesBeamerPdf(outputFile: File) {
@@ -268,6 +324,12 @@ class SampleBeamerGenerator(
             )
         )
 
+        val splitLinks = mutableMapOf<Int, MutableList<PdfLinkAnnotator.SampleLinkSpec>>()
+        fun addSplitLink(pageIdx: Int, rect: RectF, target: PdfLinkAnnotator.SampleLinkTarget) {
+            splitLinks.getOrPut(pageIdx) { mutableListOf() }
+                .add(PdfLinkAnnotator.SampleLinkSpec(rect.left, rect.top, rect.right, rect.bottom, target))
+        }
+
         for (i in 0 until 4) {
             val pageInfo = PdfDocument.PageInfo.Builder(width, height, i + 1).create()
             val page = pdf.startPage(pageInfo)
@@ -281,7 +343,16 @@ class SampleBeamerGenerator(
             slideBodies[i].forEachIndexed { idx, line ->
                 drawBullet(canvas, 60f, 150f + idx * 72f, line, maxWidth = half - 110f)
             }
-            drawBeamerFooter(canvas, half, height, "Dual-Screen Beamer", "${i + 1} / 4")
+            if (i == 0) {
+                val jumpRect = drawBeamerButton(canvas, 60f, 405f, "Jump to Stage Checklist (Slide 4) →", 36f)
+                addSplitLink(0, jumpRect, PdfLinkAnnotator.SampleLinkTarget.GoToPage(3))
+            } else if (i == 3) {
+                val backRect = drawBeamerButton(canvas, 60f, 405f, "↩ Back to Intro (Slide 1)", 36f)
+                addSplitLink(3, backRect, PdfLinkAnnotator.SampleLinkTarget.GoToPage(0))
+            }
+            drawBeamerFooterWithNav(canvas, half, height, "Dual-Screen Beamer", "${i + 1} / 4", i, 4) { rect, target ->
+                addSplitLink(i, rect, target)
+            }
             canvas.restore()
 
             // Divider line at 960 (invisible when cropped, helpful if viewed in Single mode)
@@ -330,6 +401,7 @@ class SampleBeamerGenerator(
             pdf.writeTo(fos)
         }
         pdf.close()
+        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), splitLinks)
     }
 
     private inline fun drawStandardSlide(
@@ -374,9 +446,45 @@ class SampleBeamerGenerator(
         }
     }
 
-    private fun drawBeamerFooter(canvas: Canvas, width: Int, height: Int, leftText: String, rightText: String) {
+    private fun drawBeamerButton(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        label: String,
+        height: Float = 36f
+    ): RectF {
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 15f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        val textW = textPaint.measureText(label)
+        val rect = RectF(left, top, left + textW + 26f, top + height)
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(30, 58, 138) }
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(56, 189, 248)
+            style = Paint.Style.STROKE
+            strokeWidth = 1.5f
+        }
+        canvas.drawRoundRect(rect, 8f, 8f, bgPaint)
+        canvas.drawRoundRect(rect, 8f, 8f, borderPaint)
+        canvas.drawText(label, left + 13f, top + height * 0.65f, textPaint)
+        return rect
+    }
+
+    private inline fun drawBeamerFooterWithNav(
+        canvas: Canvas,
+        width: Int,
+        height: Int,
+        leftText: String,
+        rightText: String,
+        pageIndex: Int,
+        totalPages: Int,
+        onAddNavLink: (RectF, PdfLinkAnnotator.SampleLinkTarget) -> Unit
+    ) {
+        val footerTop = height - 38f
         val footerPaint = Paint().apply { color = Color.rgb(241, 245, 249) }
-        canvas.drawRect(0f, height - 38f, width.toFloat(), height.toFloat(), footerPaint)
+        canvas.drawRect(0f, footerTop, width.toFloat(), height.toFloat(), footerPaint)
 
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.rgb(71, 85, 105)
@@ -384,8 +492,36 @@ class SampleBeamerGenerator(
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
         canvas.drawText(leftText, 44f, height - 14f, textPaint)
+
+        // Beamer bottom-right micro navigation symbols: ‹  ⌂  ›  and page indicator
+        val navBtnBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(226, 232, 240) }
+        val navGlyph = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(30, 41, 59)
+            textSize = 15f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
         val rw = textPaint.measureText(rightText)
-        canvas.drawText(rightText, width - 44f - rw, height - 14f, textPaint)
+        val counterX = width - 36f - rw
+        canvas.drawText(rightText, counterX, height - 14f, textPaint)
+
+        val btnW = 26f
+        val btnH = 24f
+        val btnTop = height - 31f
+        val nextRect = RectF(counterX - 38f, btnTop, counterX - 38f + btnW, btnTop + btnH)
+        val homeRect = RectF(nextRect.left - 32f, btnTop, nextRect.left - 32f + btnW, btnTop + btnH)
+        val prevRect = RectF(homeRect.left - 32f, btnTop, homeRect.left - 32f + btnW, btnTop + btnH)
+
+        listOf(
+            prevRect to "‹" to (pageIndex - 1).coerceAtLeast(0),
+            homeRect to "⌂" to 0,
+            nextRect to "›" to (pageIndex + 1).coerceAtMost(totalPages - 1)
+        ).forEach { (pair, targetPage) ->
+            val (r, glyph) = pair
+            canvas.drawRoundRect(r, 5f, 5f, navBtnBg)
+            canvas.drawText(glyph, r.centerX(), r.centerY() + 5f, navGlyph)
+            onAddNavLink(r, PdfLinkAnnotator.SampleLinkTarget.GoToPage(targetPage))
+        }
     }
 
     private fun drawBullet(canvas: Canvas, x: Float, y: Float, text: String, maxWidth: Float = 820f) {

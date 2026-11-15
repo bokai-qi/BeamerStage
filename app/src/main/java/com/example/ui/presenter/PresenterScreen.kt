@@ -76,6 +76,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.InteractionTool
 import com.example.model.LaserColor
@@ -91,6 +98,7 @@ fun PresenterScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val view = LocalView.current
+    val context = LocalContext.current
 
     var showSlideGrid by remember { mutableStateOf(false) }
     var showDisplayConfig by remember { mutableStateOf(false) }
@@ -333,6 +341,42 @@ fun PresenterScreen(
             onDismiss = { showNoteEditor = false }
         )
     }
+
+    val pendingUri = uiState.pendingExternalUri
+    if (pendingUri != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissExternalUri,
+            title = { Text("Open External PDF Link?") },
+            text = {
+                Text(
+                    text = pendingUri,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.dismissExternalUri()
+                        runCatching {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(pendingUri))
+                            context.startActivity(intent)
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_open_external_link")
+                ) {
+                    Text("Open URL")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissExternalUri) {
+                    Text("Stay on Slides")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -565,10 +609,13 @@ private fun InteractiveSlideStage(
                 activeStroke = uiState.activeStroke,
                 laserState = uiState.laserState,
                 activeTool = uiState.activeTool,
+                links = uiState.currentSlideLinks,
+                showLinkHints = uiState.showLinkHints,
                 isBlackoutOverlay = false,
                 interactive = true,
                 onNextSlide = viewModel::nextSlide,
                 onPreviousSlide = viewModel::previousSlide,
+                onLinkClick = viewModel::onPdfLinkClicked,
                 onLaserMove = viewModel::updateLaserPointer,
                 onLaserEnd = viewModel::endLaserPointer,
                 onStrokeStart = viewModel::startStroke,
@@ -577,7 +624,7 @@ private fun InteractiveSlideStage(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Subtle Status Chips overlaid in corners
+            // Subtle Status Chips overlaid in top-left corner
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -596,6 +643,29 @@ private fun InteractiveSlideStage(
                         text = "AUDIENCE BLACKOUT",
                         containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                         contentColor = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
+
+            // One-tap return chip after following a non-sequential PDF hyperlink
+            val jumpBackIdx = uiState.jumpBackPageIndex
+            if (jumpBackIdx != null) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.94f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .clickable { viewModel.returnFromJump() }
+                        .testTag("jump_back_pill")
+                ) {
+                    Text(
+                        text = "↩ Slide ${jumpBackIdx + 1}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
             }
@@ -700,8 +770,42 @@ private fun ToolDockBar(
                 }
             }
 
-            // Contextual Color Picker Row for Laser or Pen/Highlighter
-            if (uiState.activeTool == InteractionTool.LASER) {
+            // Contextual Sub-row for Navigate Links, Laser, or Pen/Highlighter
+            if (uiState.activeTool == InteractionTool.NAVIGATE && uiState.currentSlideLinks.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, start = 4.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    val count = uiState.currentSlideLinks.size
+                    Text(
+                        text = "$count PDF ${if (count == 1) "link" else "links"} active · Tap link or swipe",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = uiState.showLinkHints,
+                        onClick = viewModel::toggleLinkHints,
+                        label = {
+                            Text(
+                                text = "Link Boxes",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Link,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        },
+                        modifier = Modifier.testTag("toggle_link_hints_chip")
+                    )
+                }
+            } else if (uiState.activeTool == InteractionTool.LASER) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
