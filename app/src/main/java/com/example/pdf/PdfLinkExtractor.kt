@@ -7,16 +7,24 @@ import com.example.model.BeamerLayoutMode
 import com.example.model.NormalizedRect
 import com.example.model.PdfLinkAction
 import com.example.model.PdfSlideLink
+import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.Inflater
 
 /**
  * Extracts clickable internal GoTo and external URI links from PDF pages.
  * Uses Android V (API 35+) native PdfRenderer link APIs when available, and
- * falls back to a self-contained PDF object/annotation parser for API 24-34.
+ * falls back to a streaming low-memory PDF object/annotation parser for API 24-34.
  */
 object PdfLinkExtractor {
+
+    private const val MAX_DICT_BYTES = 1024 * 1024
+    private const val MAX_OBJSTM_INPUT_BYTES = 4 * 1024 * 1024
+    private const val MAX_OBJSTM_OUTPUT_BYTES = 8 * 1024 * 1024
+    private const val MAX_PAGE_TREE_DEPTH = 64
 
     data class RawPageLink(
         val leftFraction: Float,
@@ -96,6 +104,54 @@ object PdfLinkExtractor {
         }
     }
 
+    fun mergeSlideLinks(
+        platformLinks: List<PdfSlideLink>,
+        parsedLinks: List<PdfSlideLink>
+    ): List<PdfSlideLink> {
+        if (platformLinks.isEmpty()) return parsedLinks
+        if (parsedLinks.isEmpty()) return platformLinks
+        val merged = platformLinks.toMutableList()
+        for (candidate in parsedLinks) {
+            val isDuplicate = merged.any { existing ->
+                existing.action == candidate.action &&
+                    boundsOverlapOrMatch(existing.bounds, candidate.bounds)
+            }
+            if (!isDuplicate) {
+                merged.add(candidate)
+            }
+        }
+        return merged
+    }
+
+    private fun boundsOverlapOrMatch(
+        first: List<NormalizedRect>,
+        second: List<NormalizedRect>
+    ): Boolean {
+        for (a in first) {
+            for (b in second) {
+                val interLeft = maxOf(a.left, b.left)
+                val interTop = maxOf(a.top, b.top)
+                val interRight = minOf(a.right, b.right)
+                val interBottom = minOf(a.bottom, b.bottom)
+                if (interRight > interLeft && interBottom > interTop) {
+                    val interArea = (interRight - interLeft) * (interBottom - interTop)
+                    val areaA = (a.right - a.left) * (a.bottom - a.top)
+                    val areaB = (b.right - b.left) * (b.bottom - b.top)
+                    val minArea = minOf(areaA, areaB).coerceAtLeast(1e-6f)
+                    if (interArea / minArea >= 0.25f) {
+                        return true
+                    }
+                }
+                val centerAX = (a.left + a.right) * 0.5f
+                val centerAY = (a.top + a.bottom) * 0.5f
+                if (b.contains(centerAX, centerAY, slop = 0.015f)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private fun mapPageRectToSlideNormalized(
         rect: RectF,
         pageWidth: Float,
@@ -140,25 +196,36 @@ object PdfLinkExtractor {
         return NormalizedRect(mappedLeft, mappedTop, mappedRight, mappedBottom)
     }
 
-    /**
-     * Parses raw PDF bytes to extract page-level link annotations (/Subtype /Link).
-     * Supports incremental updates, /FlateDecode /ObjStm object streams, named destinations,
-     * /GoTo actions, /URI actions, and Beamer /Named actions (/NextPage, /PrevPage, etc.).
-     */
     fun extractLinksFromPdfBytes(pdfBytes: ByteArray): Map<Int, List<RawPageLink>> {
-        val text = String(pdfBytes, StandardCharsets.ISO_8859_1)
-        val objects = parseAllObjects(pdfBytes, text)
+        return extractLinksFromStream(ByteArrayInputStream(pdfBytes))
+    }
+
+    /**
+     * Streaming low-memory PDF parser for link annotations (/Subtype /Link).
+     * Skips binary image/font/content streams in-place without loading the PDF into RAM,
+     * while expanding /ObjStm object streams and resolving /GoTo, /URI, and /Named actions.
+     */
+    fun extractLinksFromStream(inputStream: InputStream): Map<Int, List<RawPageLink>> {
+        val scan = scanPdfObjects(inputStream)
+        val objects = scan.objects
         if (objects.isEmpty()) return emptyMap()
 
-        val rootRef = findRootObjectNumber(text) ?: findCatalogObjectNumber(objects) ?: return emptyMap()
+        val rootRef = scan.rootObjNum ?: findCatalogObjectNumber(objects) ?: return emptyMap()
         val catalogBody = objects[rootRef] ?: return emptyMap()
 
         val pagesRootRef = extractIndirectRef(catalogBody, "/Pages") ?: return emptyMap()
         val orderedPages = mutableListOf<PageNode>()
-        collectPages(pagesRootRef, objects, floatArrayOf(0f, 0f, 612f, 792f), orderedPages)
+        collectPages(
+            nodeObjNum = pagesRootRef,
+            objects = objects,
+            inheritedMediaBox = floatArrayOf(0f, 0f, 612f, 792f),
+            out = orderedPages,
+            visited = HashSet(),
+            depth = 0
+        )
         if (orderedPages.isEmpty()) return emptyMap()
 
-        val pageNumByObj = mutableMapOf<Int, Int>()
+        val pageNumByObj = HashMap<Int, Int>(orderedPages.size * 2)
         orderedPages.forEachIndexed { idx, node ->
             pageNumByObj[node.objNum] = idx
         }
@@ -222,36 +289,379 @@ object PdfLinkExtractor {
         val mediaBox: FloatArray
     )
 
-    private fun parseAllObjects(pdfBytes: ByteArray, text: String): Map<Int, String> {
+    private data class ScanResult(
+        val objects: Map<Int, String>,
+        val rootObjNum: Int?
+    )
+
+    private fun scanPdfObjects(rawStream: InputStream): ScanResult {
+        val stream = if (rawStream is BufferedInputStream) rawStream else BufferedInputStream(rawStream, 65536)
         val objects = HashMap<Int, String>()
-        val objHeaderRegex = Regex("""(?:^|[\r\n])\s*(\d+)\s+\d+\s+obj\b""")
-        val matches = objHeaderRegex.findAll(text).toList()
+        var lastRootRef: Int? = null
 
-        for (i in matches.indices) {
-            val match = matches[i]
-            val objNum = match.groupValues[1].toIntOrNull() ?: continue
-            val bodyStart = match.range.last + 1
-            val searchLimit = if (i + 1 < matches.size) matches[i + 1].range.first else text.length
-            val endObjIdx = text.indexOf("endobj", bodyStart)
-            val bodyEnd = if (endObjIdx in bodyStart until searchLimit) endObjIdx else searchLimit
-            val rawBody = text.substring(bodyStart, bodyEnd).trim()
-            // In PDF incremental updates, later object definitions overwrite earlier ones
-            objects[objNum] = rawBody
+        val objHeaderRegex = Regex("""^\s*(\d+)\s+\d+\s+obj(?=\s|<<|\[|/|\(|$)([\s\S]*)$""")
+        val rootRefRegex = Regex("""/Root\s+(\d+)\s+\d+\s+R""")
+        val directLengthRegex = Regex("""/Length\s+(\d+)(?![0-9])(?!\s+\d+\s+R)""")
 
-            // Expand compressed PDF 1.5+ /ObjStm streams if present
-            if (rawBody.contains("/Type") && rawBody.contains("/ObjStm")) {
-                parseObjStm(pdfBytes, text, bodyStart, bodyEnd, rawBody, objects)
+        val lineBuf = ByteArrayOutputStream(256)
+        val objBuf = ByteArrayOutputStream(2048)
+
+        // Fixed 16-byte circular buffer to detect `endobj` and `stream\n` / `stream\r` with 0 heap allocations
+        val tailRing = ByteArray(16)
+        var tailCount = 0
+
+        var inObj = false
+        var currentObjNum = -1
+        var objTruncated = false
+
+        fun resetObjectState() {
+            inObj = false
+            currentObjNum = -1
+            objTruncated = false
+            tailCount = 0
+            lineBuf.reset()
+            objBuf.reset()
+        }
+
+        fun pushTailByte(b: Int) {
+            tailRing[tailCount and 15] = b.toByte()
+            tailCount++
+        }
+
+        fun tailByteFromEnd(offsetFromEnd: Int): Int {
+            // offsetFromEnd = 0 is most recent byte
+            val idx = (tailCount - 1 - offsetFromEnd) and 15
+            return tailRing[idx].toInt() and 0xFF
+        }
+
+        fun matchesEndObjAtDelimiter(): Boolean {
+            if (tailCount < 7) return false
+            // tailByteFromEnd(0) is delimiter (' ', '\t', '\r', '\n', '>', ']', '<', '/')
+            // preceding 6 bytes must be "endobj" and byte before that (if any) must not be alphanumeric
+            val match = tailByteFromEnd(1) == 'j'.code &&
+                tailByteFromEnd(2) == 'b'.code &&
+                tailByteFromEnd(3) == 'o'.code &&
+                tailByteFromEnd(4) == 'd'.code &&
+                tailByteFromEnd(5) == 'n'.code &&
+                tailByteFromEnd(6) == 'e'.code
+            if (!match) return false
+            if (tailCount == 7) return true
+            val before = tailByteFromEnd(7)
+            return isKeywordBoundary(before)
+        }
+
+        fun matchesStreamEol(eolByte: Int): Boolean {
+            if (tailCount < 7) return false
+            if (tailByteFromEnd(0) != eolByte) return false
+            val match = tailByteFromEnd(1) == 'm'.code &&
+                tailByteFromEnd(2) == 'a'.code &&
+                tailByteFromEnd(3) == 'e'.code &&
+                tailByteFromEnd(4) == 'r'.code &&
+                tailByteFromEnd(5) == 't'.code &&
+                tailByteFromEnd(6) == 's'.code
+            if (!match) return false
+            return tailCount == 7 || isStreamPrefixDelimiter(tailByteFromEnd(7).toByte())
+        }
+
+        fun finishObject() {
+            if (!objTruncated && objBuf.size() > 0) {
+                val full = String(objBuf.toByteArray(), StandardCharsets.ISO_8859_1)
+                val endIdx = full.lastIndexOf("endobj")
+                val body = (if (endIdx >= 0) full.substring(0, endIdx) else full).trim()
+                rootRefRegex.findAll(body).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()?.let {
+                    lastRootRef = it
+                }
+                if (isRelevantMetadataObject(body)) {
+                    objects[currentObjNum] = body
+                }
+            }
+            resetObjectState()
+        }
+
+        fun feedObjectByte(byteInt: Int): Boolean {
+            if (objBuf.size() < MAX_DICT_BYTES) {
+                objBuf.write(byteInt)
+            } else {
+                objTruncated = true
+            }
+            pushTailByte(byteInt)
+
+            if (byteInt == '\n'.code || byteInt == '\r'.code || byteInt == ' '.code ||
+                byteInt == '\t'.code || byteInt == '>'.code || byteInt == ']'.code || byteInt == '<'.code
+            ) {
+                if (matchesEndObjAtDelimiter()) {
+                    finishObject()
+                    return true
+                }
+            }
+
+            if (byteInt == '\n'.code || byteInt == '\r'.code) {
+                val endsWithStreamLf = byteInt == '\n'.code && matchesStreamEol('\n'.code)
+                val endsWithStreamCr = !endsWithStreamLf && byteInt == '\r'.code && matchesStreamEol('\r'.code)
+                if (endsWithStreamLf || endsWithStreamCr) {
+                    if (endsWithStreamCr) {
+                        stream.mark(1)
+                        val next = stream.read()
+                        if (next != '\n'.code && next >= 0) {
+                            stream.reset()
+                        }
+                    }
+                    val curBytes = objBuf.toByteArray()
+                    val headerBytesLen = (curBytes.size - 7).coerceAtLeast(0)
+                    val headerBody = String(curBytes, 0, headerBytesLen, StandardCharsets.ISO_8859_1).trim()
+                    rootRefRegex.findAll(headerBody).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()?.let {
+                        lastRootRef = it
+                    }
+                    if (!objTruncated && isRelevantMetadataObject(headerBody)) {
+                        objects[currentObjNum] = headerBody
+                    }
+
+                    val isObjStm = headerBody.contains("/ObjStm")
+                    val directLength = directLengthRegex.find(headerBody)?.groupValues?.get(1)?.toLongOrNull()
+
+                    if (isObjStm) {
+                        val streamBytes = readStreamUpToEndstream(
+                            stream = stream,
+                            directLength = directLength,
+                            maxBytes = MAX_OBJSTM_INPUT_BYTES
+                        )
+                        if (streamBytes != null) {
+                            parseObjStmBytes(headerBody, streamBytes, objects)
+                        }
+                    } else {
+                        skipStreamUpToEndstream(stream, directLength)
+                    }
+
+                    skipUntilEndObj(stream)
+                    resetObjectState()
+                    return true
+                }
+            }
+            return false
+        }
+
+        fun processNonObjByte(b: Int) {
+            if (b == '\n'.code || b == '\r'.code) {
+                if (lineBuf.size() > 0) {
+                    val line = lineBuf.toString(StandardCharsets.ISO_8859_1.name())
+                    lineBuf.reset()
+                    rootRefRegex.findAll(line).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()?.let {
+                        lastRootRef = it
+                    }
+                    val match = objHeaderRegex.find(line)
+                    if (match != null) {
+                        currentObjNum = match.groupValues[1].toIntOrNull() ?: -1
+                        if (currentObjNum >= 0) {
+                            inObj = true
+                            objTruncated = false
+                            tailCount = 0
+                            objBuf.reset()
+                            val remainderBytes = match.groupValues[2].toByteArray(StandardCharsets.ISO_8859_1)
+                            var idx = 0
+                            while (idx < remainderBytes.size) {
+                                val rb = remainderBytes[idx].toInt() and 0xFF
+                                idx++
+                                if (inObj) {
+                                    feedObjectByte(rb)
+                                } else {
+                                    processNonObjByte(rb)
+                                }
+                            }
+                            if (inObj) {
+                                feedObjectByte(b)
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (lineBuf.size() < 4096) {
+                    lineBuf.write(b)
+                } else {
+                    val tail = lineBuf.toByteArray()
+                    lineBuf.reset()
+                    lineBuf.write(tail, tail.size - 512, 512)
+                    lineBuf.write(b)
+                }
             }
         }
-        return objects
+
+        while (true) {
+            val b = stream.read()
+            if (b < 0) break
+            if (!inObj) {
+                processNonObjByte(b)
+            } else {
+                feedObjectByte(b)
+            }
+        }
+
+        if (inObj && objBuf.size() > 0) {
+            finishObject()
+        } else if (lineBuf.size() > 0) {
+            val tailLine = lineBuf.toString(StandardCharsets.ISO_8859_1.name())
+            rootRefRegex.findAll(tailLine).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()?.let {
+                lastRootRef = it
+            }
+        }
+
+        return ScanResult(objects, lastRootRef)
     }
 
-    private fun parseObjStm(
-        pdfBytes: ByteArray,
-        text: String,
-        bodyStart: Int,
-        bodyEnd: Int,
+    private fun isKeywordBoundary(c: Int): Boolean {
+        return c == ' '.code || c == '\t'.code || c == '\r'.code || c == '\n'.code ||
+            c == '>'.code || c == ']'.code || c == ')'.code || c == '/'.code
+    }
+
+    private fun isStreamPrefixDelimiter(byte: Byte): Boolean {
+        val c = byte.toInt() and 0xFF
+        return c == ' '.code || c == '\t'.code || c == '\r'.code || c == '\n'.code || c == '>'.code
+    }
+
+    private val destKeyRegex = Regex("""/D(?:\s|\[|\(|/)""")
+
+    private fun isRelevantMetadataObject(body: String): Boolean {
+        val trimmed = body.trimStart()
+        if (trimmed.startsWith("[")) {
+            return trimmed.contains(" R")
+        }
+        return body.contains("/Catalog") ||
+            body.contains("/Pages") ||
+            body.contains("/Page") ||
+            body.contains("/Link") ||
+            body.contains("/Annots") ||
+            body.contains("/Names") ||
+            body.contains("/Dests") ||
+            body.contains("/GoTo") ||
+            body.contains("/URI") ||
+            body.contains("/Named") ||
+            body.contains("/Dest") ||
+            body.contains("/Kids") ||
+            (body.contains(" R") && destKeyRegex.containsMatchIn(body))
+    }
+
+    private fun skipStreamUpToEndstream(stream: BufferedInputStream, directLength: Long?) {
+        if (directLength != null && directLength > 0L) {
+            skipFully(stream, directLength)
+        }
+        // Scan until `endstream` (only reads remaining padding or scans binary stream with 0 heap allocations)
+        val target = byteArrayOf(
+            'e'.code.toByte(), 'n'.code.toByte(), 'd'.code.toByte(),
+            's'.code.toByte(), 't'.code.toByte(), 'r'.code.toByte(),
+            'e'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte()
+        )
+        var matched = 0
+        while (true) {
+            val b = stream.read()
+            if (b < 0) return
+            val byteVal = b.toByte()
+            if (byteVal == target[matched]) {
+                matched++
+                if (matched == target.size) return
+            } else {
+                matched = if (byteVal == target[0]) 1 else 0
+            }
+        }
+    }
+
+    private fun skipFully(stream: InputStream, bytesToSkip: Long) {
+        var remaining = bytesToSkip
+        val discard = ByteArray(8192)
+        while (remaining > 0L) {
+            val skipped = stream.skip(remaining)
+            if (skipped > 0L) {
+                remaining -= skipped
+            } else {
+                val read = stream.read(discard, 0, minOf(remaining, discard.size.toLong()).toInt())
+                if (read < 0) return
+                remaining -= read
+            }
+        }
+    }
+
+    private fun readStreamUpToEndstream(
+        stream: BufferedInputStream,
+        directLength: Long?,
+        maxBytes: Int
+    ): ByteArray? {
+        if (directLength != null && directLength in 1..maxBytes) {
+            val len = directLength.toInt()
+            val out = ByteArray(len)
+            var offset = 0
+            while (offset < len) {
+                val read = stream.read(out, offset, len - offset)
+                if (read < 0) break
+                offset += read
+            }
+            skipStreamUpToEndstream(stream, null)
+            return if (offset == len) out else out.copyOf(offset)
+        }
+        if (directLength != null && directLength > maxBytes) {
+            skipStreamUpToEndstream(stream, directLength)
+            return null
+        }
+
+        val baos = ByteArrayOutputStream(4096)
+        val target = byteArrayOf(
+            'e'.code.toByte(), 'n'.code.toByte(), 'd'.code.toByte(),
+            's'.code.toByte(), 't'.code.toByte(), 'r'.code.toByte(),
+            'e'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte()
+        )
+        var matched = 0
+        while (true) {
+            val b = stream.read()
+            if (b < 0) return null
+            if (baos.size() >= maxBytes + target.size) {
+                skipStreamUpToEndstream(stream, null)
+                return null
+            }
+            baos.write(b)
+            val byteVal = b.toByte()
+            if (byteVal == target[matched]) {
+                matched++
+                if (matched == target.size) {
+                    val raw = baos.toByteArray()
+                    var dataEnd = raw.size - target.size
+                    // Strip only the single EOL separator preceding `endstream`
+                    if (dataEnd > 0 && raw[dataEnd - 1] == '\n'.code.toByte()) {
+                        dataEnd--
+                        if (dataEnd > 0 && raw[dataEnd - 1] == '\r'.code.toByte()) {
+                            dataEnd--
+                        }
+                    } else if (dataEnd > 0 && raw[dataEnd - 1] == '\r'.code.toByte()) {
+                        dataEnd--
+                    }
+                    return raw.copyOf(dataEnd)
+                }
+            } else {
+                matched = if (byteVal == target[0]) 1 else 0
+            }
+        }
+    }
+
+    private fun skipUntilEndObj(stream: BufferedInputStream) {
+        val target = byteArrayOf(
+            'e'.code.toByte(), 'n'.code.toByte(), 'd'.code.toByte(),
+            'o'.code.toByte(), 'b'.code.toByte(), 'j'.code.toByte()
+        )
+        var matched = 0
+        var count = 0
+        while (count < 256) {
+            val b = stream.read()
+            if (b < 0) return
+            count++
+            val byteVal = b.toByte()
+            if (byteVal == target[matched]) {
+                matched++
+                if (matched == target.size) return
+            } else {
+                matched = if (byteVal == target[0]) 1 else 0
+            }
+        }
+    }
+
+    private fun parseObjStmBytes(
         headerBody: String,
+        streamBytes: ByteArray,
         objects: MutableMap<Int, String>
     ) {
         val nMatch = Regex("""/N\s+(\d+)""").find(headerBody) ?: return
@@ -259,28 +669,13 @@ object PdfLinkExtractor {
         val count = nMatch.groupValues[1].toIntOrNull() ?: return
         val firstOffset = firstMatch.groupValues[1].toIntOrNull() ?: return
 
-        val streamKeywordIdx = text.indexOf("stream", bodyStart)
-        if (streamKeywordIdx < 0 || streamKeywordIdx >= bodyEnd) return
-        var dataStart = streamKeywordIdx + "stream".length
-        if (dataStart < pdfBytes.size && pdfBytes[dataStart] == '\r'.code.toByte()) dataStart++
-        if (dataStart < pdfBytes.size && pdfBytes[dataStart] == '\n'.code.toByte()) dataStart++
-
-        val endStreamIdx = text.indexOf("endstream", dataStart)
-        if (endStreamIdx < 0 || endStreamIdx > bodyEnd) return
-        var dataEnd = endStreamIdx
-        while (dataEnd > dataStart && (pdfBytes[dataEnd - 1] == '\n'.code.toByte() || pdfBytes[dataEnd - 1] == '\r'.code.toByte())) {
-            dataEnd--
-        }
-        if (dataEnd <= dataStart) return
-
-        val compressedSlice = pdfBytes.copyOfRange(dataStart, dataEnd)
         val decodedBytes = if (headerBody.contains("/FlateDecode")) {
-            inflateBytes(compressedSlice) ?: return
+            inflateBytes(streamBytes, MAX_OBJSTM_OUTPUT_BYTES) ?: return
         } else {
-            compressedSlice
+            streamBytes
         }
         val decoded = String(decodedBytes, StandardCharsets.ISO_8859_1)
-        if (firstOffset > decoded.length) return
+        if (firstOffset <= 0 || firstOffset > decoded.length) return
 
         val headerNums = Regex("""\d+""").findAll(decoded.substring(0, firstOffset))
             .mapNotNull { it.value.toIntOrNull() }
@@ -294,33 +689,39 @@ object PdfLinkExtractor {
             val start = firstOffset + pairs[i].second
             val end = if (i + 1 < pairs.size) firstOffset + pairs[i + 1].second else decoded.length
             if (start in 0..end && end <= decoded.length) {
-                objects.putIfAbsent(objId, decoded.substring(start, end).trim())
+                val objBody = decoded.substring(start, end).trim()
+                if (isRelevantMetadataObject(objBody)) {
+                    objects[objId] = objBody
+                }
             }
         }
     }
 
-    private fun inflateBytes(input: ByteArray): ByteArray? {
-        return runCatching {
-            val inflater = Inflater()
+    private fun inflateBytes(input: ByteArray, maxOutputBytes: Int = MAX_OBJSTM_OUTPUT_BYTES): ByteArray? {
+        val inflater = Inflater()
+        return try {
             inflater.setInput(input)
             val baos = ByteArrayOutputStream()
             val buf = ByteArray(4096)
-            while (!inflater.finished()) {
+            var zeroReads = 0
+            while (!inflater.finished() && baos.size() < maxOutputBytes) {
                 val read = inflater.inflate(buf)
                 if (read == 0) {
                     if (inflater.needsInput() || inflater.needsDictionary()) break
+                    zeroReads++
+                    if (zeroReads > 4) break
                 } else {
-                    baos.write(buf, 0, read)
+                    zeroReads = 0
+                    val allowed = minOf(read, maxOutputBytes - baos.size())
+                    baos.write(buf, 0, allowed)
                 }
             }
-            inflater.end()
             baos.toByteArray()
-        }.getOrNull()
-    }
-
-    private fun findRootObjectNumber(text: String): Int? {
-        val matches = Regex("""/Root\s+(\d+)\s+\d+\s+R""").findAll(text).toList()
-        return matches.lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+        } catch (_: Throwable) {
+            null
+        } finally {
+            inflater.end()
+        }
     }
 
     private fun findCatalogObjectNumber(objects: Map<Int, String>): Int? {
@@ -333,28 +734,32 @@ object PdfLinkExtractor {
         nodeObjNum: Int,
         objects: Map<Int, String>,
         inheritedMediaBox: FloatArray,
-        out: MutableList<PageNode>
+        out: MutableList<PageNode>,
+        visited: MutableSet<Int>,
+        depth: Int
     ) {
+        if (depth > MAX_PAGE_TREE_DEPTH || !visited.add(nodeObjNum)) return
         val body = objects[nodeObjNum] ?: return
         val mediaBox = extractFloatArray(body, "/MediaBox", 4) ?: inheritedMediaBox
         val cropBox = extractFloatArray(body, "/CropBox", 4) ?: mediaBox
 
-        val kidsMatch = Regex("""/Kids\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL).find(body)
-        if (kidsMatch != null && Regex("""/Type\s*/Pages\b""").containsMatchIn(body)) {
-            val kidRefs = Regex("""(\d+)\s+\d+\s+R""").findAll(kidsMatch.groupValues[1])
+        val kidsContent = extractBracketedContent(body, "/Kids")
+        val isLeafPage = Regex("""/Type\s*/Page\b""").containsMatchIn(body)
+        if (kidsContent != null && !isLeafPage) {
+            val kidRefs = Regex("""(\d+)\s+\d+\s+R""").findAll(kidsContent)
                 .mapNotNull { it.groupValues[1].toIntOrNull() }
             for (kid in kidRefs) {
-                collectPages(kid, objects, cropBox, out)
+                collectPages(kid, objects, cropBox, out, visited, depth + 1)
             }
-        } else if (Regex("""/Type\s*/Page\b""").containsMatchIn(body)) {
+        } else if (isLeafPage) {
             out.add(PageNode(nodeObjNum, cropBox))
         }
     }
 
     private fun extractAnnotsRefs(pageBody: String, objects: Map<Int, String>): List<Int> {
-        val directArray = Regex("""/Annots\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL).find(pageBody)
+        val directArray = extractBracketedContent(pageBody, "/Annots")
         if (directArray != null) {
-            return Regex("""(\d+)\s+\d+\s+R""").findAll(directArray.groupValues[1])
+            return Regex("""(\d+)\s+\d+\s+R""").findAll(directArray)
                 .mapNotNull { it.groupValues[1].toIntOrNull() }
                 .toList()
         }
@@ -371,18 +776,24 @@ object PdfLinkExtractor {
         pageNumByObj: Map<Int, Int>
     ): Map<String, Int> {
         val result = mutableMapOf<String, Int>()
-        // 1. /Dests dictionary on Catalog
         val destsRef = extractIndirectRef(catalogBody, "/Dests")
         if (destsRef != null) {
             objects[destsRef]?.let { parseDestsDictEntries(it, objects, pageNumByObj, result) }
+        } else {
+            extractInlineDict(catalogBody, "/Dests")?.let {
+                parseDestsDictEntries(it, objects, pageNumByObj, result)
+            }
         }
-        // 2. /Names -> /Dests name tree
         val namesRef = extractIndirectRef(catalogBody, "/Names")
-        val namesBody = if (namesRef != null) objects[namesRef] else catalogBody
+        val namesBody = if (namesRef != null) objects[namesRef] else extractInlineDict(catalogBody, "/Names")
         if (namesBody != null) {
             val nameTreeRef = extractIndirectRef(namesBody, "/Dests")
             if (nameTreeRef != null) {
-                traverseNameTree(nameTreeRef, objects, pageNumByObj, result)
+                traverseNameTree(nameTreeRef, objects, pageNumByObj, result, HashSet(), 0)
+            } else {
+                extractInlineDict(namesBody, "/Dests")?.let { inlineTree ->
+                    traverseNameTreeBody(inlineTree, objects, pageNumByObj, result, HashSet(), 0)
+                }
             }
         }
         return result
@@ -411,26 +822,43 @@ object PdfLinkExtractor {
         nodeObj: Int,
         objects: Map<Int, String>,
         pageNumByObj: Map<Int, Int>,
-        out: MutableMap<String, Int>
+        out: MutableMap<String, Int>,
+        visited: MutableSet<Int>,
+        depth: Int
     ) {
+        if (depth > MAX_PAGE_TREE_DEPTH || !visited.add(nodeObj)) return
         val body = objects[nodeObj] ?: return
-        val kidsMatch = Regex("""/Kids\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL).find(body)
-        if (kidsMatch != null) {
-            Regex("""(\d+)\s+\d+\s+R""").findAll(kidsMatch.groupValues[1]).forEach { m ->
-                m.groupValues[1].toIntOrNull()?.let { traverseNameTree(it, objects, pageNumByObj, out) }
+        traverseNameTreeBody(body, objects, pageNumByObj, out, visited, depth)
+    }
+
+    private fun traverseNameTreeBody(
+        body: String,
+        objects: Map<Int, String>,
+        pageNumByObj: Map<Int, Int>,
+        out: MutableMap<String, Int>,
+        visited: MutableSet<Int>,
+        depth: Int
+    ) {
+        val kidsContent = extractBracketedContent(body, "/Kids")
+        if (kidsContent != null) {
+            Regex("""(\d+)\s+\d+\s+R""").findAll(kidsContent).forEach { m ->
+                m.groupValues[1].toIntOrNull()?.let {
+                    traverseNameTree(it, objects, pageNumByObj, out, visited, depth + 1)
+                }
             }
         }
-        val namesMatch = Regex("""/Names\s*\[(.*)]""", RegexOption.DOT_MATCHES_ALL).find(body)
-        if (namesMatch != null) {
-            val content = namesMatch.groupValues[1]
-            val entryRegex = Regex("""\(([^)]*)\)\s*(?:\[(\d+)\s+\d+\s+R[^\]]*]|(\d+)\s+\d+\s+R)""")
-            entryRegex.findAll(content).forEach { m ->
+        val namesContent = extractBracketedContent(body, "/Names")
+        if (namesContent != null) {
+            val entryRegex = Regex(
+                """\(((?:\\.|[^\\)])*)\)\s*(?:\[\s*(\d+)\s+\d+\s+R[^\]]*]|<<[^>]*?/D\s*\[\s*(\d+)\s+\d+\s+R|(\d+)\s+\d+\s+R)"""
+            )
+            entryRegex.findAll(namesContent).forEach { m ->
                 val name = unescapePdfString(m.groupValues[1])
-                val directPageObj = m.groupValues[2].toIntOrNull()
+                val directPageObj = m.groupValues[2].toIntOrNull() ?: m.groupValues[3].toIntOrNull()
                 if (directPageObj != null) {
                     pageNumByObj[directPageObj]?.let { out[name] = it }
                 } else {
-                    val destObj = m.groupValues[3].toIntOrNull()
+                    val destObj = m.groupValues[4].toIntOrNull()
                     val destBody = destObj?.let { objects[it] }
                     if (destBody != null) {
                         resolveDestBodyToPage(destBody, pageNumByObj)?.let { out[name] = it }
@@ -448,17 +876,15 @@ object PdfLinkExtractor {
         currentPageIndex: Int,
         totalPages: Int
     ): PdfLinkAction? {
-        // Direct /Dest on annotation
         extractDestTarget(annotBody, "/Dest", objects, pageNumByObj, namedDests)?.let {
             return PdfLinkAction.GoToPage(it)
         }
 
-        // /A action (either inline dictionary or indirect reference)
         val actionRef = extractIndirectRef(annotBody, "/A")
         val actionBody = if (actionRef != null) {
             objects[actionRef]
         } else {
-            extractInlineActionDict(annotBody)
+            extractInlineDict(annotBody, "/A")
         } ?: return null
 
         val actionType = Regex("""/S\s*/([A-Za-z]+)""").find(actionBody)?.groupValues?.get(1)
@@ -473,7 +899,7 @@ object PdfLinkExtractor {
             "Named" -> {
                 val named = Regex("""/N\s*/([A-Za-z]+)""").find(actionBody)?.groupValues?.get(1)
                 when (named) {
-                    "NextPage" -> PdfLinkAction.GoToPage((currentPageIndex + 1).coerceAtMost(totalPages - 1))
+                    "NextPage" -> PdfLinkAction.GoToPage((currentPageIndex + 1).coerceAtMost((totalPages - 1).coerceAtLeast(0)))
                     "PrevPage" -> PdfLinkAction.GoToPage((currentPageIndex - 1).coerceAtLeast(0))
                     "FirstPage" -> PdfLinkAction.GoToPage(0)
                     "LastPage" -> PdfLinkAction.GoToPage((totalPages - 1).coerceAtLeast(0))
@@ -484,25 +910,59 @@ object PdfLinkExtractor {
         }
     }
 
-    private fun extractInlineActionDict(annotBody: String): String? {
-        val idx = Regex("""/A\s*<<""").find(annotBody)?.range?.last ?: return null
+    private fun extractBracketedContent(body: String, key: String): String? {
+        val m = Regex("""$key\s*\[""").find(body) ?: return null
+        val start = m.range.last + 1
+        var depth = 1
+        var inString = false
+        var escaped = false
+        var i = start
+        while (i < body.length) {
+            val c = body[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == ')') {
+                    inString = false
+                }
+            } else {
+                when (c) {
+                    '(' -> inString = true
+                    '[' -> depth++
+                    ']' -> {
+                        depth--
+                        if (depth == 0) {
+                            return body.substring(start, i)
+                        }
+                    }
+                }
+            }
+            i++
+        }
+        return null
+    }
+
+    private fun extractInlineDict(body: String, key: String): String? {
+        val idx = Regex("""$key\s*<<""").find(body)?.range?.last ?: return null
         var depth = 0
         var i = idx - 1
-        while (i < annotBody.length - 1) {
-            if (annotBody[i] == '<' && annotBody[i + 1] == '<') {
+        while (i < body.length - 1) {
+            if (body[i] == '<' && body[i + 1] == '<') {
                 depth++
                 i += 2
-            } else if (annotBody[i] == '>' && annotBody[i + 1] == '>') {
+            } else if (body[i] == '>' && body[i + 1] == '>') {
                 depth--
                 i += 2
                 if (depth <= 0) {
-                    return annotBody.substring(idx - 1, i)
+                    return body.substring(idx - 1, i)
                 }
             } else {
                 i++
             }
         }
-        return annotBody.substring(idx - 1)
+        return body.substring(idx - 1)
     }
 
     private fun extractDestTarget(
@@ -512,24 +972,20 @@ object PdfLinkExtractor {
         pageNumByObj: Map<Int, Int>,
         namedDests: Map<String, Int>
     ): Int? {
-        // 1. Array: /Dest [12 0 R /Fit]
         val arrMatch = Regex("""$key\s*\[\s*(\d+)\s+\d+\s+R""").find(body)
         if (arrMatch != null) {
             val obj = arrMatch.groupValues[1].toIntOrNull()
             if (obj != null) return pageNumByObj[obj]
         }
-        // 2. Literal string named dest: /D (section.1)
-        val strMatch = Regex("""$key\s*\(([^)]*)\)""").find(body)
+        val strMatch = Regex("""$key\s*\(((?:\\.|[^\\)])*)\)""").find(body)
         if (strMatch != null) {
             val name = unescapePdfString(strMatch.groupValues[1])
             namedDests[name]?.let { return it }
         }
-        // 3. Name dest: /D /section1
         val nameMatch = Regex("""$key\s*/([A-Za-z0-9_.:+-]+)""").find(body)
         if (nameMatch != null) {
             namedDests[nameMatch.groupValues[1]]?.let { return it }
         }
-        // 4. Indirect ref to destination array/dict
         val ref = extractIndirectRef(body, key)
         if (ref != null) {
             val refBody = objects[ref]
@@ -567,8 +1023,9 @@ object PdfLinkExtractor {
         val hexMatch = Regex("""$key\s*<([0-9A-Fa-f\s]+)>""").find(body)
         if (hexMatch != null) {
             val clean = hexMatch.groupValues[1].replace(Regex("\\s+"), "")
+            if (clean.length < 2) return null
             val bytes = ByteArray(clean.length / 2) { idx ->
-                clean.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+                clean.substring(idx * 2, idx * 2 + 2).toIntOrNull(16)?.toByte() ?: 0
             }
             return String(bytes, StandardCharsets.UTF_8)
         }

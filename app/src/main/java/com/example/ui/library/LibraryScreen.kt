@@ -27,8 +27,10 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BrightnessAuto
@@ -49,6 +51,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -72,22 +75,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.R
 import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
+import com.example.model.DarkThemeStyle
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
 import com.example.model.UserPreferences
+import com.example.ui.theme.OledBlack
+import com.example.ui.theme.StageSurface
 
 @Composable
 fun LibraryScreen(
@@ -221,6 +224,7 @@ fun LibraryScreen(
         StageSettingsSheet(
             preferences = uiState.preferences,
             onSelectThemeMode = viewModel::setThemeMode,
+            onSelectDarkThemeStyle = viewModel::setDarkThemeStyle,
             onToggleSimplePresentingMode = viewModel::setSimplePresentingMode,
             onToggleVolumeKeys = viewModel::setVolumeKeysNavigate,
             onToggleKeepScreenOn = viewModel::setKeepScreenOn,
@@ -328,100 +332,94 @@ private fun StageHeroCard(
     onOpenPdfClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (connectedDisplay != null) {
+                MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)
+            } else {
+                MaterialTheme.colorScheme.outlineVariant
+            }
+        ),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(172.dp)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Image(
-                painter = painterResource(id = R.drawable.img_stage_hero_banner),
-                contentDescription = "BeamerStage auditorium presentation stage",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.background.copy(alpha = 0.94f),
-                                MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
-                                MaterialTheme.colorScheme.background.copy(alpha = 0.35f)
-                            )
-                        )
-                    )
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(18.dp),
-                verticalArrangement = Arrangement.SpaceBetween
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (connectedDisplay != null) {
+                    MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer
+                },
+                modifier = Modifier.size(48.dp)
             ) {
-                Column {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (connectedDisplay != null) {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.primaryContainer
-                        }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (connectedDisplay != null) Icons.Default.CastConnected else Icons.Default.Cast,
-                                contentDescription = null,
-                                tint = if (connectedDisplay != null) {
-                                    MaterialTheme.colorScheme.secondary
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                },
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = connectedDisplay?.name ?: "LATEX BEAMER · DUAL-SCREEN CONSOLE",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (connectedDisplay != null) {
-                                    MaterialTheme.colorScheme.secondary
-                                } else {
-                                    MaterialTheme.colorScheme.primary
-                                }
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Cast crisp slides.\nKeep notes private.",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                }
-
-                Button(
-                    onClick = onOpenPdfClick,
-                    enabled = !isImporting,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    modifier = Modifier.testTag("open_pdf_button")
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Default.PictureAsPdf,
+                        imageVector = if (connectedDisplay != null) {
+                            Icons.Default.CastConnected
+                        } else {
+                            Icons.Default.Cast
+                        },
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        tint = if (connectedDisplay != null) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.size(22.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(if (isImporting) "Loading PDF..." else "Open Beamer PDF")
                 }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Text(
+                    text = connectedDisplay?.name ?: "USB-C DisplayPort / HDMI",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = connectedDisplay?.let {
+                        "${it.resolutionLabel} @ ${it.refreshRate.toInt()} Hz · Ready to cast"
+                    } ?: "Import any LaTeX Beamer or PDF slide deck",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (connectedDisplay != null) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Button(
+                onClick = onOpenPdfClick,
+                enabled = !isImporting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                modifier = Modifier.testTag("open_pdf_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PictureAsPdf,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (isImporting) "Loading…" else "Open PDF")
             }
         }
     }
@@ -622,6 +620,7 @@ private fun EmptyDecksCard(onOpenPdfClick: () -> Unit) {
 private fun StageSettingsSheet(
     preferences: UserPreferences,
     onSelectThemeMode: (AppThemeMode) -> Unit,
+    onSelectDarkThemeStyle: (DarkThemeStyle) -> Unit,
     onToggleSimplePresentingMode: (Boolean) -> Unit,
     onToggleVolumeKeys: (Boolean) -> Unit,
     onToggleKeepScreenOn: (Boolean) -> Unit,
@@ -638,6 +637,7 @@ private fun StageSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -664,6 +664,31 @@ private fun StageSettingsSheet(
                                 )
                             },
                             modifier = Modifier.testTag("theme_chip_${mode.name.lowercase()}")
+                        )
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Dark Mode Style", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DarkThemeStyle.entries.forEach { style ->
+                        val selected = preferences.darkThemeStyle == style
+                        FilterChip(
+                            selected = selected,
+                            onClick = { onSelectDarkThemeStyle(style) },
+                            label = { Text(style.label) },
+                            leadingIcon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (style == DarkThemeStyle.OLED) OledBlack else StageSurface
+                                        )
+                                )
+                            },
+                            modifier = Modifier.testTag("dark_style_chip_${style.name.lowercase()}")
                         )
                     }
                 }
@@ -769,6 +794,25 @@ private fun StageSettingsSheet(
                     value = preferences.noteFontSizeSp,
                     onValueChange = onChangeNoteFontSize,
                     valueRange = 12f..28f
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_credits_section"),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Credits",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text(
+                    text = "Thank you for using, happy presenting!",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

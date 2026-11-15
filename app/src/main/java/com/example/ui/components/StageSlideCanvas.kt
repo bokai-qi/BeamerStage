@@ -94,6 +94,8 @@ fun StageSlideCanvas(
     ) {
         val boxW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
         val boxH = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+        val latestBoxW = rememberUpdatedState(boxW)
+        val latestBoxH = rememberUpdatedState(boxH)
 
         val pointerModifier = if (interactive) {
             Modifier.pointerInput(Unit) {
@@ -101,7 +103,9 @@ fun StageSlideCanvas(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val tool = latestTool.value
                     val bmp = latestBitmap.value
-                    val slideRect = computeSlideRect(boxW, boxH, bmp)
+                    val curBoxW = latestBoxW.value
+                    val curBoxH = latestBoxH.value
+                    val slideRect = computeSlideRect(curBoxW, curBoxH, bmp)
 
                     when (tool) {
                         InteractionTool.LASER -> {
@@ -179,9 +183,9 @@ fun StageSlideCanvas(
                                         if (hitLink != null) {
                                             tappedLinkId = hitLink.id
                                             onLinkClick(hitLink)
-                                        } else if (startPos.x < boxW * 0.22f) {
+                                        } else if (startPos.x < curBoxW * 0.22f) {
                                             onPreviousSlide()
-                                        } else if (startPos.x > boxW * 0.78f) {
+                                        } else if (startPos.x > curBoxW * 0.78f) {
                                             onNextSlide()
                                         }
                                     }

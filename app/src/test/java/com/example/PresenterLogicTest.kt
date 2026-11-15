@@ -3,9 +3,11 @@ package com.example
 import com.example.model.AnnotationStroke
 import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
+import com.example.model.DarkThemeStyle
 import com.example.model.NormalizedPoint
 import com.example.model.NormalizedRect
 import com.example.model.PdfLinkAction
+import com.example.model.PdfSlideLink
 import com.example.model.UserPreferences
 import com.example.pdf.PdfLinkAnnotator
 import com.example.pdf.PdfLinkExtractor
@@ -16,8 +18,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.util.zip.Deflater
 
 class PresenterLogicTest {
 
@@ -207,6 +211,137 @@ class PresenterLogicTest {
     fun userPreferencesIncludeThemeAndSimpleModeDefaults() {
         val prefs = UserPreferences()
         assertEquals(AppThemeMode.DARK, prefs.themeMode)
+        assertEquals(DarkThemeStyle.STAGE, prefs.darkThemeStyle)
+        assertEquals(2, DarkThemeStyle.entries.size)
         assertFalse(prefs.simplePresentingMode)
+    }
+
+    @Test
+    fun streamingLinkExtractorSkipsLargeBinaryStreamsAndHandlesInlineObjectsAndCycles() {
+        val imagePayloadSize = 4 * 1024 * 1024 // 4 MB embedded image stream
+        val sb = StringBuilder()
+        sb.append("%PDF-1.5\n")
+        sb.append("1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n")
+        sb.append("2 0 obj << /Type /Pages /Kids [2 0 R 3 0 R 4 0 R] /Count 2 /MediaBox [0 0 960 540] >> endobj\n")
+        sb.append("3 0 obj << /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> /Annots [6 0 R] >> endobj\n")
+        sb.append("4 0 obj << /Type /Page /Parent 2 0 R >> endobj\n")
+        sb.append("5 0 obj << /Type /XObject /Subtype /Image /Length $imagePayloadSize >>\nstream\n")
+        val prefixBytes = sb.toString().toByteArray(StandardCharsets.ISO_8859_1)
+
+        val suffix = """
+            
+            endstream
+            endobj
+            6 0 obj << /Type /Annot /Subtype /Link /Rect [100 100 300 200] /A << /S /GoTo /D 7 0 R >> >> endobj
+            7 0 obj [4 0 R /Fit] endobj
+            trailer
+            << /Size 8 /Root 1 0 R >>
+            %%EOF
+        """.trimIndent().toByteArray(StandardCharsets.ISO_8859_1)
+
+        val combined = ByteArray(prefixBytes.size + imagePayloadSize + suffix.size)
+        System.arraycopy(prefixBytes, 0, combined, 0, prefixBytes.size)
+        // Fill image payload with arbitrary bytes
+        for (i in 0 until imagePayloadSize step 4) {
+            combined[prefixBytes.size + i] = 0x55
+        }
+        System.arraycopy(suffix, 0, combined, prefixBytes.size + imagePayloadSize, suffix.size)
+
+        val parsed = PdfLinkExtractor.extractLinksFromStream(combined.inputStream())
+        val p0Links = parsed[0].orEmpty()
+        assertEquals(1, p0Links.size)
+        assertEquals(PdfLinkAction.GoToPage(1), p0Links[0].action)
+    }
+
+    @Test
+    fun objStmWithIndirectLengthExtractsBeamerNamedButtonsAndEscapedDests() {
+        val obj3 = "<< /Type /Page /Parent 2 0 R /Annots [7 0 R 8 0 R] >>"
+        val obj4 = "<< /Type /Page /Parent 2 0 R >>"
+        val obj6 = "<< /Names [(frame\\(end\\)) << /D [4 0 R /Fit] >>] >>"
+        val obj7 = "<< /Type /Annot /Subtype /Link /Rect [800 10 840 30] /A << /S /Named /N /NextPage >> >>"
+        val obj8 = "<< /Type /Annot /Subtype /Link /Rect [100 100 300 160] /A << /S /GoTo /D (frame\\(end\\)) >> >>"
+
+        val entries = listOf(3 to obj3, 4 to obj4, 6 to obj6, 7 to obj7, 8 to obj8)
+        val bodies = StringBuilder()
+        val header = StringBuilder()
+        var offset = 0
+        for ((id, body) in entries) {
+            header.append("$id $offset ")
+            bodies.append(body).append('\n')
+            offset += body.length + 1
+        }
+        val headerStr = header.toString()
+        val rawObjStm = (headerStr + bodies.toString()).toByteArray(StandardCharsets.ISO_8859_1)
+
+        val deflater = Deflater()
+        deflater.setInput(rawObjStm)
+        deflater.finish()
+        val compressedOut = ByteArrayOutputStream()
+        val buf = ByteArray(1024)
+        while (!deflater.finished()) {
+            val n = deflater.deflate(buf)
+            if (n > 0) compressedOut.write(buf, 0, n)
+        }
+        deflater.end()
+        val compressedBytes = compressedOut.toByteArray()
+
+        val pdfOut = ByteArrayOutputStream()
+        pdfOut.write(
+            """
+            %PDF-1.5
+            1 0 obj << /Type /Catalog /Pages 2 0 R /Names << /Dests 6 0 R >> >> endobj
+            2 0 obj << /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 960 540] >> endobj
+            10 0 obj << /Type /ObjStm /N ${entries.size} /First ${headerStr.length} /Filter /FlateDecode /Length 20 0 R >>
+            stream
+            """.trimIndent().toByteArray(StandardCharsets.ISO_8859_1)
+        )
+        pdfOut.write('\n'.code)
+        pdfOut.write(compressedBytes)
+        pdfOut.write(
+            """
+            
+            endstream
+            endobj
+            20 0 obj ${compressedBytes.size} endobj
+            trailer << /Size 21 /Root 1 0 R >>
+            %%EOF
+            """.trimIndent().toByteArray(StandardCharsets.ISO_8859_1)
+        )
+
+        val parsed = PdfLinkExtractor.extractLinksFromStream(pdfOut.toByteArray().inputStream())
+        val p0 = parsed[0].orEmpty()
+        assertEquals(2, p0.size)
+        assertEquals(PdfLinkAction.GoToPage(1), p0[0].action)
+        assertEquals(PdfLinkAction.GoToPage(1), p0[1].action)
+    }
+
+    @Test
+    fun mergeSlideLinksPreservesBeamerButtonsAndDeduplicatesOverlappingPlatformLinks() {
+        val platformLinks = listOf(
+            PdfSlideLink(
+                id = "goto_0_0",
+                bounds = listOf(NormalizedRect(0.10f, 0.20f, 0.30f, 0.28f)),
+                action = PdfLinkAction.GoToPage(3)
+            )
+        )
+        val parsedLinks = listOf(
+            // Duplicate of native link
+            PdfSlideLink(
+                id = "raw_0_0",
+                bounds = listOf(NormalizedRect(0.101f, 0.201f, 0.299f, 0.279f)),
+                action = PdfLinkAction.GoToPage(3)
+            ),
+            // Beamer navigation button (/Named /NextPage) missed by Android PdfRenderer
+            PdfSlideLink(
+                id = "raw_0_1",
+                bounds = listOf(NormalizedRect(0.85f, 0.90f, 0.92f, 0.96f)),
+                action = PdfLinkAction.GoToPage(1)
+            )
+        )
+
+        val merged = PdfLinkExtractor.mergeSlideLinks(platformLinks, parsedLinks)
+        assertEquals(2, merged.size)
+        assertEquals("goto_0_0", merged[0].id)
+        assertEquals("raw_0_1", merged[1].id)
     }
 }

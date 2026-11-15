@@ -89,6 +89,11 @@ enum class AppThemeMode(val label: String) {
     LIGHT("Light")
 }
 
+enum class DarkThemeStyle(val label: String) {
+    STAGE("Stage Dark"),
+    OLED("OLED Black")
+}
+
 data class UserPreferences(
     val volumeKeysNavigate: Boolean = true,
     val keepScreenOn: Boolean = true,
@@ -96,6 +101,7 @@ data class UserPreferences(
     val defaultLaserColor: LaserColor = LaserColor.CRIMSON,
     val showTimerBar: Boolean = true,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val darkThemeStyle: DarkThemeStyle = DarkThemeStyle.STAGE,
     val simplePresentingMode: Boolean = false
 )
 

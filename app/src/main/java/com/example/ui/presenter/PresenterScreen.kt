@@ -117,6 +117,8 @@ fun PresenterScreen(
     LaunchedEffect(showSlideGrid) {
         if (showSlideGrid) {
             viewModel.loadAllGridThumbnails()
+        } else {
+            viewModel.clearGridThumbnails()
         }
     }
 

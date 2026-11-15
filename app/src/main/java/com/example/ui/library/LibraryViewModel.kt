@@ -15,6 +15,7 @@ import com.example.data.local.PresentationRepository
 import com.example.display.ExternalDisplayController
 import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
+import com.example.model.DarkThemeStyle
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
 import com.example.model.UserPreferences
@@ -191,6 +192,16 @@ class LibraryViewModel(
 
     fun setThemeMode(mode: AppThemeMode) {
         viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
+    }
+
+    fun setDarkThemeStyle(style: DarkThemeStyle) {
+        viewModelScope.launch {
+            preferencesRepository.setDarkThemeStyle(style)
+            // If currently explicitly on Light mode, switch into Dark so user sees the selected dark style immediately
+            if (uiState.value.preferences.themeMode == AppThemeMode.LIGHT) {
+                preferencesRepository.setThemeMode(AppThemeMode.DARK)
+            }
+        }
     }
 
     fun setSimplePresentingMode(enabled: Boolean) {

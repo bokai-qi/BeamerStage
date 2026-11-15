@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.model.AppThemeMode
+import com.example.model.DarkThemeStyle
 import com.example.model.LaserColor
 import com.example.model.UserPreferences
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +26,7 @@ class PreferencesRepository(private val context: Context) {
         val DEFAULT_LASER_COLOR = stringPreferencesKey("default_laser_color")
         val SHOW_TIMER_BAR = booleanPreferencesKey("show_timer_bar")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val DARK_THEME_STYLE = stringPreferencesKey("dark_theme_style")
         val SIMPLE_PRESENTING_MODE = booleanPreferencesKey("simple_presenting_mode")
     }
 
@@ -33,6 +35,8 @@ class PreferencesRepository(private val context: Context) {
         val laserColor = LaserColor.entries.firstOrNull { it.name == laserColorName } ?: LaserColor.CRIMSON
         val themeName = prefs[Keys.THEME_MODE] ?: AppThemeMode.DARK.name
         val themeMode = AppThemeMode.entries.firstOrNull { it.name == themeName } ?: AppThemeMode.DARK
+        val darkStyleName = prefs[Keys.DARK_THEME_STYLE] ?: DarkThemeStyle.STAGE.name
+        val darkStyle = DarkThemeStyle.entries.firstOrNull { it.name == darkStyleName } ?: DarkThemeStyle.STAGE
         UserPreferences(
             volumeKeysNavigate = prefs[Keys.VOLUME_KEYS_NAVIGATE] ?: true,
             keepScreenOn = prefs[Keys.KEEP_SCREEN_ON] ?: true,
@@ -40,6 +44,7 @@ class PreferencesRepository(private val context: Context) {
             defaultLaserColor = laserColor,
             showTimerBar = prefs[Keys.SHOW_TIMER_BAR] ?: true,
             themeMode = themeMode,
+            darkThemeStyle = darkStyle,
             simplePresentingMode = prefs[Keys.SIMPLE_PRESENTING_MODE] ?: false
         )
     }
@@ -66,6 +71,10 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setThemeMode(mode: AppThemeMode) {
         context.dataStore.edit { it[Keys.THEME_MODE] = mode.name }
+    }
+
+    suspend fun setDarkThemeStyle(style: DarkThemeStyle) {
+        context.dataStore.edit { it[Keys.DARK_THEME_STYLE] = style.name }
     }
 
     suspend fun setSimplePresentingMode(enabled: Boolean) {

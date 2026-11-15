@@ -11,16 +11,23 @@ import android.util.LruCache
 import com.example.model.BeamerLayoutMode
 import com.example.model.PdfSlideLink
 import com.example.model.SlideBitmapPair
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.security.MessageDigest
 import kotlin.math.roundToInt
 
 class PdfSlideEngine(private val context: Context) {
 
     private val renderMutex = Mutex()
+    private var openGeneration: Long = 0L
     private var currentUriString: String? = null
     private var fileDescriptor: ParcelFileDescriptor? = null
     private var pdfRenderer: PdfRenderer? = null
@@ -28,8 +35,12 @@ class PdfSlideEngine(private val context: Context) {
     private var cachedRawLinksUri: String? = null
     private var cachedRawLinksByPage: Map<Int, List<PdfLinkExtractor.RawPageLink>> = emptyMap()
 
-    // 32 MB LRU Bitmap Cache for crisp instant slide changes & thumbnails
-    private val bitmapCache = object : LruCache<String, Bitmap>(32 * 1024 * 1024) {
+    // Adaptive LRU Bitmap Cache (up to 24 MB, scaled to 1/8th of max JVM heap)
+    private val cacheBytesLimit = minOf(
+        24 * 1024 * 1024,
+        (Runtime.getRuntime().maxMemory() / 8L).toInt().coerceAtLeast(8 * 1024 * 1024)
+    )
+    private val bitmapCache = object : LruCache<String, Bitmap>(cacheBytesLimit) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
 
@@ -37,25 +48,17 @@ class PdfSlideEngine(private val context: Context) {
 
     suspend fun openDocument(uriString: String): Int = withContext(Dispatchers.IO) {
         renderMutex.withLock {
+            openGeneration++
             if (currentUriString == uriString && pdfRenderer != null) {
                 return@withLock pdfRenderer!!.pageCount
             }
             closeLocked()
-            val pfd = openParcelFileDescriptor(uriString)
-                ?: throw IllegalStateException("Unable to open PDF file")
-            val renderer = PdfRenderer(pfd)
+            val (pfd, renderer) = openRendererWithFallback(uriString)
             fileDescriptor = pfd
             pdfRenderer = renderer
             currentUriString = uriString
 
-            detectedDefaultLayout = if (renderer.pageCount > 0) {
-                renderer.openPage(0).use { page ->
-                    val ratio = page.width.toFloat() / page.height.coerceAtLeast(1).toFloat()
-                    if (ratio >= 2.2f) BeamerLayoutMode.SLIDE_LEFT_NOTES_RIGHT else BeamerLayoutMode.SINGLE
-                }
-            } else {
-                BeamerLayoutMode.SINGLE
-            }
+            detectedDefaultLayout = detectLayoutLocked(renderer)
             renderer.pageCount
         }
     }
@@ -63,20 +66,15 @@ class PdfSlideEngine(private val context: Context) {
     suspend fun inspectPageCountAndTitle(uriString: String): Pair<Int, BeamerLayoutMode> =
         withContext(Dispatchers.IO) {
             renderMutex.withLock {
-                val pfd = openParcelFileDescriptor(uriString)
-                    ?: throw IllegalStateException("Cannot access selected PDF")
-                PdfRenderer(pfd).use { renderer ->
-                    val count = renderer.pageCount
-                    val autoMode = if (count > 0) {
-                        renderer.openPage(0).use { page ->
-                            val ratio = page.width.toFloat() / page.height.coerceAtLeast(1).toFloat()
-                            if (ratio >= 2.2f) BeamerLayoutMode.SLIDE_LEFT_NOTES_RIGHT else BeamerLayoutMode.SINGLE
-                        }
-                    } else {
-                        BeamerLayoutMode.SINGLE
+                val (pfd, renderer) = openRendererWithFallback(uriString)
+                try {
+                    renderer.use { r ->
+                        val count = r.pageCount
+                        val autoMode = detectLayoutLocked(r)
+                        count to autoMode
                     }
-                    pfd.close()
-                    count to autoMode
+                } finally {
+                    runCatching { pfd.close() }
                 }
             }
         }
@@ -85,7 +83,7 @@ class PdfSlideEngine(private val context: Context) {
         uriString: String,
         pageIndex: Int,
         requestedMode: BeamerLayoutMode,
-        targetSlideWidthPx: Int = 1600,
+        targetSlideWidthPx: Int = 1440,
         includeNotesBitmap: Boolean = true
     ): SlideBitmapPair = withContext(Dispatchers.IO) {
         renderMutex.withLock {
@@ -102,7 +100,8 @@ class PdfSlideEngine(private val context: Context) {
             }
 
             val slideKey = "$uriString:$pageIndex:${effectiveMode.name}:slide:$targetSlideWidthPx"
-            val notesKey = "$uriString:$pageIndex:${effectiveMode.name}:notes:${targetSlideWidthPx / 2}"
+            val notesWidthPx = (targetSlideWidthPx * 0.65f).roundToInt().coerceAtLeast(560)
+            val notesKey = "$uriString:$pageIndex:${effectiveMode.name}:notes:$notesWidthPx"
             val linksKey = "$uriString:$pageIndex:${effectiveMode.name}:links"
 
             val cachedSlide = bitmapCache.get(slideKey)
@@ -119,7 +118,7 @@ class PdfSlideEngine(private val context: Context) {
             }
 
             renderer.openPage(pageIndex).use { page ->
-                val slideBmp = cachedSlide ?: renderHalfOrFull(
+                val slideBmp = cachedSlide ?: renderHalfOrFullSafe(
                     page = page,
                     cropHalf = when (effectiveMode) {
                         BeamerLayoutMode.SLIDE_LEFT_NOTES_RIGHT -> CropHalf.LEFT
@@ -127,18 +126,18 @@ class PdfSlideEngine(private val context: Context) {
                         else -> CropHalf.FULL
                     },
                     targetWidthPx = targetSlideWidthPx
-                ).also { bitmapCache.put(slideKey, it) }
+                )?.also { bitmapCache.put(slideKey, it) }
 
                 val notesBmp = if (includeNotesBitmap && effectiveMode != BeamerLayoutMode.SINGLE) {
-                    cachedNotes ?: renderHalfOrFull(
+                    cachedNotes ?: renderHalfOrFullSafe(
                         page = page,
                         cropHalf = when (effectiveMode) {
                             BeamerLayoutMode.SLIDE_LEFT_NOTES_RIGHT -> CropHalf.RIGHT
                             BeamerLayoutMode.NOTES_LEFT_SLIDE_RIGHT -> CropHalf.LEFT
                             else -> CropHalf.FULL
                         },
-                        targetWidthPx = (targetSlideWidthPx * 0.65f).roundToInt().coerceAtLeast(640)
-                    ).also { bitmapCache.put(notesKey, it) }
+                        targetWidthPx = notesWidthPx
+                    )?.also { bitmapCache.put(notesKey, it) }
                 } else {
                     null
                 }
@@ -177,7 +176,7 @@ class PdfSlideEngine(private val context: Context) {
                     BeamerLayoutMode.NOTES_LEFT_SLIDE_RIGHT -> CropHalf.RIGHT
                     else -> CropHalf.FULL
                 }
-                renderHalfOrFull(page, cropHalf, targetWidthPx).also {
+                renderHalfOrFullSafe(page, cropHalf, targetWidthPx)?.also {
                     bitmapCache.put(key, it)
                 }
             }
@@ -190,22 +189,125 @@ class PdfSlideEngine(private val context: Context) {
         }
     }
 
+    fun releaseSessionNonBlocking() {
+        val targetGen = openGeneration
+        bitmapCache.evictAll()
+        linksCache.evictAll()
+        CoroutineScope(Dispatchers.IO).launch {
+            renderMutex.withLock {
+                if (openGeneration == targetGen) {
+                    closeLocked()
+                }
+            }
+        }
+    }
+
     private fun ensureOpenLocked(uriString: String) {
         if (currentUriString != uriString || pdfRenderer == null) {
+            openGeneration++
             closeLocked()
-            val pfd = openParcelFileDescriptor(uriString)
-                ?: throw IllegalStateException("Unable to open PDF: $uriString")
-            val renderer = PdfRenderer(pfd)
+            val (pfd, renderer) = openRendererWithFallback(uriString)
             fileDescriptor = pfd
             pdfRenderer = renderer
             currentUriString = uriString
-            detectedDefaultLayout = if (renderer.pageCount > 0) {
+            detectedDefaultLayout = detectLayoutLocked(renderer)
+        }
+    }
+
+    private fun detectLayoutLocked(renderer: PdfRenderer): BeamerLayoutMode {
+        return if (renderer.pageCount > 0) {
+            runCatching {
                 renderer.openPage(0).use { page ->
                     val ratio = page.width.toFloat() / page.height.coerceAtLeast(1).toFloat()
                     if (ratio >= 2.2f) BeamerLayoutMode.SLIDE_LEFT_NOTES_RIGHT else BeamerLayoutMode.SINGLE
                 }
+            }.getOrDefault(BeamerLayoutMode.SINGLE)
+        } else {
+            BeamerLayoutMode.SINGLE
+        }
+    }
+
+    private fun openRendererWithFallback(uriString: String): Pair<ParcelFileDescriptor, PdfRenderer> {
+        val pfd = openParcelFileDescriptor(uriString)
+        if (pfd != null) {
+            try {
+                return pfd to PdfRenderer(pfd)
+            } catch (err: Throwable) {
+                runCatching { pfd.close() }
+                // Fall back to caching stream locally if provider FD was non-seekable
+                val cachedFile = copyUriToLocalCache(uriString)
+                if (cachedFile != null) {
+                    val localPfd = ParcelFileDescriptor.open(cachedFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                    try {
+                        return localPfd to PdfRenderer(localPfd)
+                    } catch (innerErr: Throwable) {
+                        runCatching { localPfd.close() }
+                        throw innerErr
+                    }
+                }
+                throw err
+            }
+        }
+
+        val cachedFile = copyUriToLocalCache(uriString)
+            ?: throw IllegalStateException("Unable to open PDF: $uriString")
+        val localPfd = ParcelFileDescriptor.open(cachedFile, ParcelFileDescriptor.MODE_READ_ONLY)
+        try {
+            return localPfd to PdfRenderer(localPfd)
+        } catch (err: Throwable) {
+            runCatching { localPfd.close() }
+            throw err
+        }
+    }
+
+    private fun localCacheFileForUri(uriString: String): File {
+        val cacheDir = File(context.cacheDir, "pdf_cache").apply { mkdirs() }
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest(uriString.toByteArray())
+            .take(12)
+            .joinToString("") { "%02x".format(it) }
+        return File(cacheDir, "$hash.pdf")
+    }
+
+    private fun copyUriToLocalCache(uriString: String): File? {
+        return runCatching {
+            val outFile = localCacheFileForUri(uriString)
+            if (outFile.exists() && outFile.length() > 0L) {
+                outFile.setLastModified(System.currentTimeMillis())
+                prunePdfCache(outFile.parentFile, keepFile = outFile)
+                return@runCatching outFile
+            }
+            openPdfInputStream(uriString)?.use { input ->
+                FileOutputStream(outFile).use { output ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read < 0) break
+                        output.write(buf, 0, read)
+                    }
+                }
+            } ?: return@runCatching null
+            if (outFile.length() > 0L) {
+                prunePdfCache(outFile.parentFile, keepFile = outFile)
+                outFile
             } else {
-                BeamerLayoutMode.SINGLE
+                outFile.delete()
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun prunePdfCache(cacheDir: File?, keepFile: File) {
+        if (cacheDir == null || !cacheDir.exists()) return
+        val files = cacheDir.listFiles()
+            ?.filter { it.isFile && it.absolutePath != keepFile.absolutePath }
+            ?.sortedByDescending { it.lastModified() }
+            ?: return
+        var runningBytes = keepFile.length()
+        files.forEachIndexed { index, file ->
+            runningBytes += file.length()
+            if (index >= 2 || runningBytes > 80L * 1024L * 1024L) {
+                file.delete()
             }
         }
     }
@@ -217,30 +319,31 @@ class PdfSlideEngine(private val context: Context) {
         effectiveLayout: BeamerLayoutMode
     ): List<PdfSlideLink> {
         val platformLinks = PdfLinkExtractor.extractFromPlatformPage(page, effectiveLayout)
-        if (platformLinks.isNotEmpty()) {
-            return platformLinks
-        }
         if (cachedRawLinksUri != uriString) {
-            val bytes = readPdfBytes(uriString)
-            cachedRawLinksByPage = if (bytes != null) {
-                runCatching { PdfLinkExtractor.extractLinksFromPdfBytes(bytes) }
-                    .getOrDefault(emptyMap())
-            } else {
-                emptyMap()
-            }
+            cachedRawLinksByPage = runCatching {
+                val cachedFile = localCacheFileForUri(uriString)
+                val stream = if (cachedFile.exists() && cachedFile.length() > 0L) {
+                    FileInputStream(cachedFile)
+                } else {
+                    openPdfInputStream(uriString)
+                }
+                stream?.use { PdfLinkExtractor.extractLinksFromStream(it) } ?: emptyMap()
+            }.getOrDefault(emptyMap())
             cachedRawLinksUri = uriString
         }
         val rawForPage = cachedRawLinksByPage[pageIndex].orEmpty()
-        return PdfLinkExtractor.mapRawLinksToSlide(pageIndex, rawForPage, effectiveLayout)
+        val parsedLinks = PdfLinkExtractor.mapRawLinksToSlide(pageIndex, rawForPage, effectiveLayout)
+        return PdfLinkExtractor.mergeSlideLinks(platformLinks, parsedLinks)
     }
 
-    private fun readPdfBytes(uriString: String): ByteArray? {
+    private fun openPdfInputStream(uriString: String): InputStream? {
         return runCatching {
             val uri = Uri.parse(uriString)
             if (uri.scheme == "file") {
-                File(uri.path ?: return null).readBytes()
+                val path = uri.path ?: return null
+                FileInputStream(File(path))
             } else {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                context.contentResolver.openInputStream(uri)
             }
         }.getOrNull()
     }
@@ -261,11 +364,29 @@ class PdfSlideEngine(private val context: Context) {
             val file = File(uri.path ?: return null)
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         } else {
-            context.contentResolver.openFileDescriptor(uri, "r")
+            runCatching { context.contentResolver.openFileDescriptor(uri, "r") }.getOrNull()
         }
     }
 
     private enum class CropHalf { FULL, LEFT, RIGHT }
+
+    private fun renderHalfOrFullSafe(
+        page: PdfRenderer.Page,
+        cropHalf: CropHalf,
+        targetWidthPx: Int
+    ): Bitmap? {
+        return try {
+            renderHalfOrFull(page, cropHalf, targetWidthPx)
+        } catch (_: OutOfMemoryError) {
+            bitmapCache.evictAll()
+            System.gc()
+            runCatching {
+                renderHalfOrFull(page, cropHalf, (targetWidthPx / 2).coerceAtLeast(360))
+            }.getOrNull()
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     private fun renderHalfOrFull(
         page: PdfRenderer.Page,
@@ -275,9 +396,11 @@ class PdfSlideEngine(private val context: Context) {
         val pageWidth = page.width.coerceAtLeast(1).toFloat()
         val pageHeight = page.height.coerceAtLeast(1).toFloat()
         val sourceWidth = if (cropHalf == CropHalf.FULL) pageWidth else pageWidth / 2f
-        val scale = targetWidthPx.toFloat() / sourceWidth
-        val outWidth = targetWidthPx.coerceAtLeast(1)
-        val outHeight = (pageHeight * scale).roundToInt().coerceIn(1, 2400)
+        val maxW = targetWidthPx.coerceAtLeast(1)
+        val maxH = 1920f
+        val scale = minOf(maxW.toFloat() / sourceWidth, maxH / pageHeight).coerceAtLeast(0.05f)
+        val outWidth = (sourceWidth * scale).roundToInt().coerceIn(1, maxW)
+        val outHeight = (pageHeight * scale).roundToInt().coerceIn(1, 1920)
 
         val bitmap = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(Color.WHITE)

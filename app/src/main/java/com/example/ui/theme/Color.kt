@@ -10,6 +10,13 @@ val StageSurfaceHighest = Color(0xFF232C3F)
 val StageOutline = Color(0xFF2A354A)
 val StageOutlineSubtle = Color(0xFF1E2636)
 
+// OLED True Black Palette
+val OledBlack = Color(0xFF000000)
+val OledSurfaceElevated = Color(0xFF0A0C10)
+val OledSurfaceHighest = Color(0xFF131720)
+val OledOutline = Color(0xFF242B38)
+val OledOutlineSubtle = Color(0xFF161B24)
+
 val StageTextPrimary = Color(0xFFF8FAFC)
 val StageTextSecondary = Color(0xFF94A3B8)
 val StageTextMuted = Color(0xFF64748B)

@@ -37,6 +37,35 @@ private val StageDarkColorScheme = darkColorScheme(
     onError = StageTextPrimary
 )
 
+private val StageOledDarkColorScheme = darkColorScheme(
+    primary = SkyCyan,
+    onPrimary = OledBlack,
+    primaryContainer = SkyCyanContainer,
+    onPrimaryContainer = SkyCyan,
+    secondary = EmeraldSignal,
+    onSecondary = OledBlack,
+    secondaryContainer = EmeraldContainer,
+    onSecondaryContainer = EmeraldSignal,
+    tertiary = LaserCrimson,
+    onTertiary = StageTextPrimary,
+    tertiaryContainer = LaserCrimsonContainer,
+    onTertiaryContainer = LaserCrimson,
+    background = OledBlack,
+    onBackground = StageTextPrimary,
+    surface = OledBlack,
+    onSurface = StageTextPrimary,
+    surfaceVariant = OledSurfaceElevated,
+    onSurfaceVariant = StageTextSecondary,
+    surfaceContainerLowest = OledBlack,
+    surfaceContainerLow = OledBlack,
+    surfaceContainer = OledSurfaceElevated,
+    surfaceContainerHigh = OledSurfaceHighest,
+    outline = OledOutline,
+    outlineVariant = OledOutlineSubtle,
+    error = LaserCrimson,
+    onError = StageTextPrimary
+)
+
 private val StageLightColorScheme = lightColorScheme(
     primary = SkyCyanDark,
     onPrimary = LightSurface,
@@ -77,9 +106,14 @@ val BeamerShapes = Shapes(
 @Composable
 fun BeamerStageTheme(
     darkTheme: Boolean = true,
+    oledBlack: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) StageDarkColorScheme else StageLightColorScheme
+    val colorScheme = when {
+        !darkTheme -> StageLightColorScheme
+        oledBlack -> StageOledDarkColorScheme
+        else -> StageDarkColorScheme
+    }
 
     MaterialTheme(
         colorScheme = colorScheme,

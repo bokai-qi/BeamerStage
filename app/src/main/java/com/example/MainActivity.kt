@@ -18,6 +18,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.model.AppThemeMode
+import com.example.model.DarkThemeStyle
 import com.example.ui.LibraryRoute
 import com.example.ui.PresenterRoute
 import com.example.ui.library.LibraryScreen
@@ -67,7 +68,10 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            BeamerStageTheme(darkTheme = darkTheme) {
+            BeamerStageTheme(
+                darkTheme = darkTheme,
+                oledBlack = prefs.darkThemeStyle == DarkThemeStyle.OLED
+            ) {
                 val navController = rememberNavController()
 
                 NavHost(

@@ -559,13 +559,19 @@ class PresenterViewModel(
             for (idx in 0 until state.totalPages) {
                 if (!_uiState.value.slideGridThumbnails.containsKey(idx)) {
                     val bmp = runCatching {
-                        pdfEngine.renderThumbnail(deck.uriString, idx, state.requestedLayoutMode, 300)
+                        pdfEngine.renderThumbnail(deck.uriString, idx, state.requestedLayoutMode, 220)
                     }.getOrNull()
                     _uiState.update { current ->
                         current.copy(slideGridThumbnails = current.slideGridThumbnails + (idx to bmp))
                     }
                 }
             }
+        }
+    }
+
+    fun clearGridThumbnails() {
+        if (_uiState.value.slideGridThumbnails.isNotEmpty()) {
+            _uiState.update { it.copy(slideGridThumbnails = emptyMap()) }
         }
     }
 
@@ -581,7 +587,7 @@ class PresenterViewModel(
                     uriString = deck.uriString,
                     pageIndex = pageIndex,
                     requestedMode = mode,
-                    targetSlideWidthPx = 1600,
+                    targetSlideWidthPx = 1440,
                     includeNotesBitmap = true
                 )
             }.getOrNull()
@@ -592,7 +598,7 @@ class PresenterViewModel(
                         uriString = deck.uriString,
                         pageIndex = pageIndex + 1,
                         requestedMode = mode,
-                        targetWidthPx = 560
+                        targetWidthPx = 480
                     )
                 }.getOrNull()
             } else {
@@ -610,15 +616,10 @@ class PresenterViewModel(
             }
             pushToExternalDisplay()
 
-            // Pre-warm cache for next and previous slides so navigation feels instant
+            // Pre-warm next slide gently without thrashing cache on large decks
             if (pageIndex + 1 < state.totalPages) {
                 runCatching {
-                    pdfEngine.renderSlidePair(deck.uriString, pageIndex + 1, mode, 1600, true)
-                }
-            }
-            if (pageIndex - 1 >= 0) {
-                runCatching {
-                    pdfEngine.renderSlidePair(deck.uriString, pageIndex - 1, mode, 1600, true)
+                    pdfEngine.renderSlidePair(deck.uriString, pageIndex + 1, mode, 1440, false)
                 }
             }
         }
@@ -637,8 +638,20 @@ class PresenterViewModel(
     override fun onCleared() {
         super.onCleared()
         timerJob?.cancel()
+        renderJob?.cancel()
+        _uiState.update {
+            it.copy(
+                currentSlideBitmap = null,
+                beamerNotesBitmap = null,
+                nextSlideBitmap = null,
+                frozenSlideBitmap = null,
+                slideGridThumbnails = emptyMap(),
+                currentSlideLinks = emptyList()
+            )
+        }
         displayController.setPresenterSessionActive(false)
         displayController.updateOutput(null, emptyList(), LaserPointerState(), false)
+        pdfEngine.releaseSessionNonBlocking()
     }
 
     class Factory(
