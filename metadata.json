@@ -1,0 +1,6 @@
+{
+  "name": "BeamerStage",
+  "description": "LaTeX Beamer PDF presenter with USB-C DisplayPort external projector output, speaker notes, timer, annotations, and laser pointer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
