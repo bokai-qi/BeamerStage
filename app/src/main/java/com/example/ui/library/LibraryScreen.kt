@@ -806,11 +806,11 @@ private fun StageSettingsSheet(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = "Credits",
+                    text = "Thank you for using, happy presenting!",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Text(
-                    text = "Thank you for using, happy presenting!",
+                    text = "By Bokai Qi, built with Google Gemini.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
