@@ -10,6 +10,7 @@ import com.example.data.local.PreferencesRepository
 import com.example.data.local.PresentationRepository
 import com.example.display.ExternalDisplayController
 import com.example.model.AnnotationStroke
+import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
 import com.example.model.ExternalDisplayInfo
 import com.example.model.InteractionTool
@@ -22,6 +23,7 @@ import com.example.model.PenColor
 import com.example.model.UserPreferences
 import com.example.pdf.PdfSlideEngine
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +46,8 @@ data class PresenterUiState(
     val nextSlideBitmap: Bitmap? = null,
     val currentNoteText: String = "",
     val activeTool: InteractionTool = InteractionTool.NAVIGATE,
+    val isEraserActive: Boolean = false,
+    val eraserPosition: NormalizedPoint? = null,
     val laserColor: LaserColor = LaserColor.CRIMSON,
     val penColor: PenColor = PenColor.CRIMSON,
     val laserState: LaserPointerState = LaserPointerState(),
@@ -87,6 +91,7 @@ class PresenterViewModel(
     private var annotationsMap: Map<Int, List<AnnotationStroke>> = emptyMap()
     private var timerJob: Job? = null
     private var renderJob: Job? = null
+    private var erasedDuringGesture: Boolean = false
 
     init {
         displayController.setPresenterSessionActive(true)
@@ -190,6 +195,7 @@ class PresenterViewModel(
                 currentNoteText = notesMap[clamped].orEmpty(),
                 currentSlideStrokes = annotationsMap[clamped].orEmpty(),
                 activeStroke = null,
+                eraserPosition = null,
                 laserState = it.laserState.copy(isActive = false, position = null, trail = emptyList())
             )
         }
@@ -261,11 +267,25 @@ class PresenterViewModel(
         _uiState.update {
             it.copy(
                 activeTool = tool,
+                isEraserActive = false,
+                eraserPosition = null,
                 laserState = it.laserState.copy(isActive = false, position = null, trail = emptyList()),
                 activeStroke = null
             )
         }
         pushToExternalDisplay()
+    }
+
+    fun toggleEraser() {
+        _uiState.update { state ->
+            val supportsEraser = state.activeTool == InteractionTool.PEN ||
+                state.activeTool == InteractionTool.HIGHLIGHTER
+            if (!supportsEraser) state else state.copy(
+                isEraserActive = !state.isEraserActive,
+                eraserPosition = null,
+                activeStroke = null
+            )
+        }
     }
 
     fun setLaserColor(color: LaserColor) {
@@ -280,7 +300,26 @@ class PresenterViewModel(
     }
 
     fun setPenColor(color: PenColor) {
-        _uiState.update { it.copy(penColor = color) }
+        _uiState.update {
+            it.copy(
+                penColor = color,
+                isEraserActive = false,
+                eraserPosition = null
+            )
+        }
+    }
+
+    fun toggleSimplePresentingMode() {
+        val next = !_uiState.value.preferences.simplePresentingMode
+        viewModelScope.launch { preferencesRepository.setSimplePresentingMode(next) }
+    }
+
+    fun setSimplePresentingMode(enabled: Boolean) {
+        viewModelScope.launch { preferencesRepository.setSimplePresentingMode(enabled) }
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
     }
 
     fun updateLaserPointer(point: NormalizedPoint) {
@@ -387,6 +426,50 @@ class PresenterViewModel(
         pushToExternalDisplay()
         viewModelScope.launch {
             repository.saveSlideAnnotations(deckId, page, emptyList())
+        }
+    }
+
+    fun startErase(point: NormalizedPoint) {
+        erasedDuringGesture = false
+        val clamped = NormalizedPoint(point.x.coerceIn(0f, 1f), point.y.coerceIn(0f, 1f))
+        _uiState.update { it.copy(eraserPosition = clamped) }
+        eraseAt(clamped)
+    }
+
+    fun moveErase(point: NormalizedPoint) {
+        val clamped = NormalizedPoint(point.x.coerceIn(0f, 1f), point.y.coerceIn(0f, 1f))
+        _uiState.update { it.copy(eraserPosition = clamped) }
+        eraseAt(clamped)
+    }
+
+    fun endErase() {
+        val state = _uiState.value
+        val page = state.currentPageIndex
+        val strokesToSave = state.currentSlideStrokes
+        _uiState.update { it.copy(eraserPosition = null) }
+        if (erasedDuringGesture) {
+            erasedDuringGesture = false
+            viewModelScope.launch {
+                repository.saveSlideAnnotations(deckId, page, strokesToSave)
+            }
+        }
+    }
+
+    private fun eraseAt(point: NormalizedPoint) {
+        val state = _uiState.value
+        val existing = state.currentSlideStrokes
+        if (existing.isEmpty()) return
+        val remaining = StrokeHitTest.removeStrokesNear(existing, point)
+        if (remaining.size != existing.size) {
+            erasedDuringGesture = true
+            val page = state.currentPageIndex
+            _uiState.update {
+                it.copy(
+                    currentSlideStrokes = remaining,
+                    frozenStrokes = if (it.isFrozen && it.frozenPageIndex == page) remaining else it.frozenStrokes
+                )
+            }
+            pushToExternalDisplay()
         }
     }
 
@@ -572,5 +655,53 @@ class PresenterViewModel(
                 displayController = container.externalDisplayController
             ) as T
         }
+    }
+}
+
+object StrokeHitTest {
+    private const val DEFAULT_ERASER_RADIUS = 0.032f
+
+    fun removeStrokesNear(
+        strokes: List<AnnotationStroke>,
+        point: NormalizedPoint,
+        eraserRadius: Float = DEFAULT_ERASER_RADIUS
+    ): List<AnnotationStroke> {
+        return strokes.filterNot { stroke -> isPointNearStroke(point, stroke, eraserRadius) }
+    }
+
+    fun isPointNearStroke(
+        point: NormalizedPoint,
+        stroke: AnnotationStroke,
+        eraserRadius: Float = DEFAULT_ERASER_RADIUS
+    ): Boolean {
+        val pts = stroke.points
+        if (pts.isEmpty()) return false
+        val effectiveRadius = maxOf(eraserRadius, stroke.strokeWidthRatio * 1.45f)
+        if (pts.size == 1) {
+            return hypot((point.x - pts[0].x).toDouble(), (point.y - pts[0].y).toDouble()) <= effectiveRadius
+        }
+        for (i in 1 until pts.size) {
+            if (distancePointToSegment(point, pts[i - 1], pts[i]) <= effectiveRadius) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun distancePointToSegment(
+        p: NormalizedPoint,
+        a: NormalizedPoint,
+        b: NormalizedPoint
+    ): Float {
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val lenSq = dx * dx + dy * dy
+        if (lenSq <= 1e-8f) {
+            return hypot((p.x - a.x).toDouble(), (p.y - a.y).toDouble()).toFloat()
+        }
+        val t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq).coerceIn(0f, 1f)
+        val projX = a.x + t * dx
+        val projY = a.y + t * dy
+        return hypot((p.x - projX).toDouble(), (p.y - projY).toDouble()).toFloat()
     }
 }

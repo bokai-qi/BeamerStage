@@ -40,6 +40,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -204,6 +205,7 @@ fun DisplayAndBeamerConfigSheet(
     requestedMode: BeamerLayoutMode,
     effectiveMode: BeamerLayoutMode,
     targetMinutes: Int,
+    simplePresentingMode: Boolean,
     projectedBitmap: Bitmap?,
     projectedStrokes: List<AnnotationStroke>,
     laserState: LaserPointerState,
@@ -211,6 +213,7 @@ fun DisplayAndBeamerConfigSheet(
     isFrozen: Boolean,
     onSelectLayoutMode: (BeamerLayoutMode) -> Unit,
     onSelectTargetMinutes: (Int) -> Unit,
+    onToggleSimplePresentingMode: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -372,6 +375,39 @@ fun DisplayAndBeamerConfigSheet(
                             }
                         }
                     }
+                }
+            }
+
+            // Simple Presenting Mode Toggle
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Simple Presenting Mode",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            text = "Show only the current slide with all tools; hide Next Slide and Speaker Notes.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Switch(
+                        checked = simplePresentingMode,
+                        onCheckedChange = onToggleSimplePresentingMode,
+                        modifier = Modifier.testTag("sheet_switch_simple_mode")
+                    )
                 }
             }
 

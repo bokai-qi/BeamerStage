@@ -31,9 +31,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
@@ -80,6 +83,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
@@ -145,6 +149,15 @@ fun LibraryScreen(
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     LibraryTopHeader(
                         connectedDisplay = uiState.connectedDisplay,
+                        themeMode = uiState.preferences.themeMode,
+                        onCycleTheme = {
+                            val next = when (uiState.preferences.themeMode) {
+                                AppThemeMode.DARK -> AppThemeMode.LIGHT
+                                AppThemeMode.LIGHT -> AppThemeMode.SYSTEM
+                                AppThemeMode.SYSTEM -> AppThemeMode.DARK
+                            }
+                            viewModel.setThemeMode(next)
+                        },
                         onOpenSettings = { showSettingsSheet = true },
                         onOpenGuide = { showGuideSheet = true }
                     )
@@ -207,6 +220,8 @@ fun LibraryScreen(
     if (showSettingsSheet) {
         StageSettingsSheet(
             preferences = uiState.preferences,
+            onSelectThemeMode = viewModel::setThemeMode,
+            onToggleSimplePresentingMode = viewModel::setSimplePresentingMode,
             onToggleVolumeKeys = viewModel::setVolumeKeysNavigate,
             onToggleKeepScreenOn = viewModel::setKeepScreenOn,
             onSelectLaserColor = viewModel::setDefaultLaserColor,
@@ -223,6 +238,8 @@ fun LibraryScreen(
 @Composable
 private fun LibraryTopHeader(
     connectedDisplay: ExternalDisplayInfo?,
+    themeMode: AppThemeMode,
+    onCycleTheme: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenGuide: () -> Unit
 ) {
@@ -268,7 +285,20 @@ private fun LibraryTopHeader(
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            IconButton(
+                onClick = onCycleTheme,
+                modifier = Modifier.testTag("theme_toggle_button")
+            ) {
+                Icon(
+                    imageVector = when (themeMode) {
+                        AppThemeMode.DARK -> Icons.Default.DarkMode
+                        AppThemeMode.LIGHT -> Icons.Default.LightMode
+                        AppThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
+                    },
+                    contentDescription = "Theme: ${themeMode.label}. Tap to switch"
+                )
+            }
             IconButton(
                 onClick = onOpenGuide,
                 modifier = Modifier.testTag("beamer_guide_button")
@@ -591,6 +621,8 @@ private fun EmptyDecksCard(onOpenPdfClick: () -> Unit) {
 @Composable
 private fun StageSettingsSheet(
     preferences: UserPreferences,
+    onSelectThemeMode: (AppThemeMode) -> Unit,
+    onToggleSimplePresentingMode: (Boolean) -> Unit,
     onToggleVolumeKeys: (Boolean) -> Unit,
     onToggleKeepScreenOn: (Boolean) -> Unit,
     onSelectLaserColor: (LaserColor) -> Unit,
@@ -611,6 +643,52 @@ private fun StageSettingsSheet(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("Stage Preferences", style = MaterialTheme.typography.titleLarge)
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Appearance", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppThemeMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = preferences.themeMode == mode,
+                            onClick = { onSelectThemeMode(mode) },
+                            label = { Text(mode.label) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = when (mode) {
+                                        AppThemeMode.DARK -> Icons.Default.DarkMode
+                                        AppThemeMode.LIGHT -> Icons.Default.LightMode
+                                        AppThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
+                                    },
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            modifier = Modifier.testTag("theme_chip_${mode.name.lowercase()}")
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Simple Presenting Mode", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Show only the current slide and tools on your device without Next Slide or Speaker Notes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = preferences.simplePresentingMode,
+                    onCheckedChange = onToggleSimplePresentingMode,
+                    modifier = Modifier.testTag("switch_simple_mode")
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

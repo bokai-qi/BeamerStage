@@ -83,12 +83,20 @@ data class ExternalDisplayInfo(
     val resolutionLabel: String get() = "${width}×${height}"
 }
 
+enum class AppThemeMode(val label: String) {
+    SYSTEM("System"),
+    DARK("Dark"),
+    LIGHT("Light")
+}
+
 data class UserPreferences(
     val volumeKeysNavigate: Boolean = true,
     val keepScreenOn: Boolean = true,
     val noteFontSizeSp: Float = 16f,
     val defaultLaserColor: LaserColor = LaserColor.CRIMSON,
-    val showTimerBar: Boolean = true
+    val showTimerBar: Boolean = true,
+    val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val simplePresentingMode: Boolean = false
 )
 
 @Serializable

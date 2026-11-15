@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.model.AppThemeMode
 import com.example.model.LaserColor
 import com.example.model.UserPreferences
 import kotlinx.coroutines.flow.Flow
@@ -23,17 +24,23 @@ class PreferencesRepository(private val context: Context) {
         val NOTE_FONT_SIZE_SP = floatPreferencesKey("note_font_size_sp")
         val DEFAULT_LASER_COLOR = stringPreferencesKey("default_laser_color")
         val SHOW_TIMER_BAR = booleanPreferencesKey("show_timer_bar")
+        val THEME_MODE = stringPreferencesKey("theme_mode")
+        val SIMPLE_PRESENTING_MODE = booleanPreferencesKey("simple_presenting_mode")
     }
 
     val userPreferences: Flow<UserPreferences> = context.dataStore.data.map { prefs ->
         val laserColorName = prefs[Keys.DEFAULT_LASER_COLOR] ?: LaserColor.CRIMSON.name
         val laserColor = LaserColor.entries.firstOrNull { it.name == laserColorName } ?: LaserColor.CRIMSON
+        val themeName = prefs[Keys.THEME_MODE] ?: AppThemeMode.DARK.name
+        val themeMode = AppThemeMode.entries.firstOrNull { it.name == themeName } ?: AppThemeMode.DARK
         UserPreferences(
             volumeKeysNavigate = prefs[Keys.VOLUME_KEYS_NAVIGATE] ?: true,
             keepScreenOn = prefs[Keys.KEEP_SCREEN_ON] ?: true,
             noteFontSizeSp = prefs[Keys.NOTE_FONT_SIZE_SP] ?: 16f,
             defaultLaserColor = laserColor,
-            showTimerBar = prefs[Keys.SHOW_TIMER_BAR] ?: true
+            showTimerBar = prefs[Keys.SHOW_TIMER_BAR] ?: true,
+            themeMode = themeMode,
+            simplePresentingMode = prefs[Keys.SIMPLE_PRESENTING_MODE] ?: false
         )
     }
 
@@ -55,5 +62,13 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setShowTimerBar(show: Boolean) {
         context.dataStore.edit { it[Keys.SHOW_TIMER_BAR] = show }
+    }
+
+    suspend fun setThemeMode(mode: AppThemeMode) {
+        context.dataStore.edit { it[Keys.THEME_MODE] = mode.name }
+    }
+
+    suspend fun setSimplePresentingMode(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.SIMPLE_PRESENTING_MODE] = enabled }
     }
 }

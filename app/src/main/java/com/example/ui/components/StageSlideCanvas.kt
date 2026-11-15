@@ -56,6 +56,8 @@ fun StageSlideCanvas(
     activeTool: InteractionTool,
     links: List<PdfSlideLink> = emptyList(),
     showLinkHints: Boolean = true,
+    isEraserActive: Boolean = false,
+    eraserPosition: NormalizedPoint? = null,
     isBlackoutOverlay: Boolean = false,
     interactive: Boolean = true,
     onNextSlide: () -> Unit = {},
@@ -66,9 +68,13 @@ fun StageSlideCanvas(
     onStrokeStart: (NormalizedPoint) -> Unit = {},
     onStrokeMove: (NormalizedPoint) -> Unit = {},
     onStrokeEnd: () -> Unit = {},
+    onEraseStart: (NormalizedPoint) -> Unit = {},
+    onEraseMove: (NormalizedPoint) -> Unit = {},
+    onEraseEnd: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val latestTool = rememberUpdatedState(activeTool)
+    val latestEraser = rememberUpdatedState(isEraserActive)
     val latestBitmap = rememberUpdatedState(slideBitmap)
     val latestLinks = rememberUpdatedState(links)
     var tappedLinkId by remember { mutableStateOf<String?>(null) }
@@ -118,10 +124,11 @@ fun StageSlideCanvas(
 
                         InteractionTool.PEN, InteractionTool.HIGHLIGHTER -> {
                             down.consume()
+                            val erasing = latestEraser.value
                             val startPt = toNormalizedPoint(down.position, slideRect)
                             var started = false
                             if (startPt != null) {
-                                onStrokeStart(startPt)
+                                if (erasing) onEraseStart(startPt) else onStrokeStart(startPt)
                                 started = true
                             }
                             var pointerId = down.id
@@ -130,17 +137,19 @@ fun StageSlideCanvas(
                                 val change = event.changes.firstOrNull { it.id == pointerId }
                                     ?: event.changes.firstOrNull()
                                 if (change == null || !change.pressed) {
-                                    if (started) onStrokeEnd()
+                                    if (started) {
+                                        if (erasing) onEraseEnd() else onStrokeEnd()
+                                    }
                                     break
                                 }
                                 change.consume()
                                 pointerId = change.id
                                 toNormalizedPoint(change.position, slideRect)?.let { pt ->
                                     if (!started) {
-                                        onStrokeStart(pt)
+                                        if (erasing) onEraseStart(pt) else onStrokeStart(pt)
                                         started = true
                                     } else {
-                                        onStrokeMove(pt)
+                                        if (erasing) onEraseMove(pt) else onStrokeMove(pt)
                                     }
                                 }
                             }
@@ -337,6 +346,26 @@ fun StageSlideCanvas(
                             color = Color.White,
                             radius = coreR * 0.45f,
                             center = center
+                        )
+                    }
+
+                    // Render subtle device-only eraser reticle while dragging eraser
+                    if (interactive && isEraserActive && eraserPosition != null) {
+                        val center = Offset(
+                            slideRect.left + eraserPosition.x * slideRect.width,
+                            slideRect.top + eraserPosition.y * slideRect.height
+                        )
+                        val r = (slideRect.width * 0.032f).coerceIn(14f, 44f)
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.20f),
+                            radius = r,
+                            center = center
+                        )
+                        drawCircle(
+                            color = SkyCyan,
+                            radius = r,
+                            center = center,
+                            style = Stroke(width = 2.dp.toPx())
                         )
                     }
                 }

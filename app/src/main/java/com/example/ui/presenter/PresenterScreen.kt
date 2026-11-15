@@ -32,12 +32,15 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AcUnit
+import androidx.compose.material.icons.filled.AutoFixNormal
 import androidx.compose.material.icons.filled.BorderColor
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Flare
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.Pause
@@ -169,6 +172,7 @@ fun PresenterScreen(
                 .padding(innerPadding)
         ) {
             val isLandscapeOrWide = maxWidth >= 660.dp
+            val simpleMode = uiState.preferences.simplePresentingMode
 
             Column(modifier = Modifier.fillMaxSize()) {
                 TopStageControlBar(
@@ -177,6 +181,7 @@ fun PresenterScreen(
                     onOpenDisplayConfig = { showDisplayConfig = true },
                     onToggleTimer = viewModel::toggleTimer,
                     onResetTimer = viewModel::resetTimer,
+                    onToggleSimpleMode = viewModel::toggleSimplePresentingMode,
                     onToggleFreeze = viewModel::toggleFreeze,
                     onToggleBlackout = viewModel::toggleBlackout
                 )
@@ -188,7 +193,35 @@ fun PresenterScreen(
                     totalPages = uiState.totalPages
                 )
 
-                if (isLandscapeOrWide) {
+                if (simpleMode) {
+                    // Simple Presenting Mode: current slide + all tools, no next-slide or speaker-notes panels
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        InteractiveSlideStage(
+                            uiState = uiState,
+                            viewModel = viewModel,
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                        )
+                        ToolDockBar(
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                        BottomTransportBar(
+                            currentPageIndex = uiState.currentPageIndex,
+                            totalPages = uiState.totalPages,
+                            onPrevious = viewModel::previousSlide,
+                            onNext = viewModel::nextSlide,
+                            onOpenGrid = { showSlideGrid = true }
+                        )
+                    }
+                } else if (isLandscapeOrWide) {
                     // Wide / Landscape Broadcast Studio 2-column layout
                     Row(
                         modifier = Modifier
@@ -322,6 +355,7 @@ fun PresenterScreen(
             requestedMode = uiState.requestedLayoutMode,
             effectiveMode = uiState.effectiveLayoutMode,
             targetMinutes = uiState.targetMinutes,
+            simplePresentingMode = uiState.preferences.simplePresentingMode,
             projectedBitmap = uiState.projectedBitmap,
             projectedStrokes = uiState.projectedStrokes,
             laserState = uiState.laserState,
@@ -329,6 +363,7 @@ fun PresenterScreen(
             isFrozen = uiState.isFrozen,
             onSelectLayoutMode = viewModel::setLayoutMode,
             onSelectTargetMinutes = viewModel::updateTargetDuration,
+            onToggleSimplePresentingMode = viewModel::setSimplePresentingMode,
             onDismiss = { showDisplayConfig = false }
         )
     }
@@ -386,6 +421,7 @@ private fun TopStageControlBar(
     onOpenDisplayConfig: () -> Unit,
     onToggleTimer: () -> Unit,
     onResetTimer: () -> Unit,
+    onToggleSimpleMode: () -> Unit,
     onToggleFreeze: () -> Unit,
     onToggleBlackout: () -> Unit
 ) {
@@ -401,9 +437,9 @@ private fun TopStageControlBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 6.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         IconButton(
             onClick = onBack,
@@ -514,6 +550,21 @@ private fun TopStageControlBar(
             }
         }
 
+        // Simple Presenting Mode Button
+        val simpleActive = uiState.preferences.simplePresentingMode
+        FilledTonalIconButton(
+            onClick = onToggleSimpleMode,
+            modifier = Modifier
+                .size(48.dp)
+                .testTag("simple_mode_button")
+        ) {
+            Icon(
+                imageVector = if (simpleActive) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                contentDescription = if (simpleActive) "Exit Simple Presenting Mode" else "Simple Presenting Mode",
+                tint = if (simpleActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
         // Freeze Projector Button
         FilledTonalIconButton(
             onClick = onToggleFreeze,
@@ -586,6 +637,9 @@ private fun InteractiveSlideStage(
     viewModel: PresenterViewModel,
     modifier: Modifier = Modifier
 ) {
+    val isPenOrMark = uiState.activeTool == InteractionTool.PEN ||
+        uiState.activeTool == InteractionTool.HIGHLIGHTER
+
     Surface(
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(
@@ -594,8 +648,8 @@ private fun InteractiveSlideStage(
                 uiState.isBlackout -> MaterialTheme.colorScheme.tertiary
                 uiState.isFrozen -> MaterialTheme.colorScheme.primary
                 uiState.activeTool == InteractionTool.LASER -> Color(uiState.laserColor.colorHex)
-                uiState.activeTool == InteractionTool.PEN || uiState.activeTool == InteractionTool.HIGHLIGHTER ->
-                    Color(uiState.penColor.colorHex)
+                isPenOrMark && uiState.isEraserActive -> MaterialTheme.colorScheme.primary
+                isPenOrMark -> Color(uiState.penColor.colorHex)
                 else -> MaterialTheme.colorScheme.outline
             }
         ),
@@ -611,6 +665,8 @@ private fun InteractiveSlideStage(
                 activeTool = uiState.activeTool,
                 links = uiState.currentSlideLinks,
                 showLinkHints = uiState.showLinkHints,
+                isEraserActive = uiState.isEraserActive,
+                eraserPosition = uiState.eraserPosition,
                 isBlackoutOverlay = false,
                 interactive = true,
                 onNextSlide = viewModel::nextSlide,
@@ -621,6 +677,9 @@ private fun InteractiveSlideStage(
                 onStrokeStart = viewModel::startStroke,
                 onStrokeMove = viewModel::appendStrokePoint,
                 onStrokeEnd = viewModel::finishStroke,
+                onEraseStart = viewModel::startErase,
+                onEraseMove = viewModel::moveErase,
+                onEraseEnd = viewModel::endErase,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -643,6 +702,13 @@ private fun InteractiveSlideStage(
                         text = "AUDIENCE BLACKOUT",
                         containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                         contentColor = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+                if (isPenOrMark && uiState.isEraserActive) {
+                    StatusBadge(
+                        text = "ERASER ACTIVE",
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.primary
                     )
                 }
             }
@@ -828,7 +894,7 @@ private fun ToolDockBar(
                                 .background(Color(lc.colorHex))
                                 .border(
                                     width = if (selected) 2.5.dp else 1.dp,
-                                    color = if (selected) Color.White else Color.Transparent,
+                                    color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
                                     shape = CircleShape
                                 )
                                 .clickable { viewModel.setLaserColor(lc) }
@@ -842,29 +908,47 @@ private fun ToolDockBar(
                         .fillMaxWidth()
                         .padding(top = 6.dp, start = 4.dp, end = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = "Ink syncs live to projector",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
+                    FilterChip(
+                        selected = uiState.isEraserActive,
+                        onClick = viewModel::toggleEraser,
+                        label = {
+                            Text(
+                                text = "Eraser",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.AutoFixNormal,
+                                contentDescription = "Toggle Eraser",
+                                modifier = Modifier.size(15.dp)
+                            )
+                        },
+                        modifier = Modifier.testTag("tool_eraser_toggle")
                     )
-                    PenColor.entries.forEach { pc ->
-                        val selected = uiState.penColor == pc
-                        Box(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(Color(pc.colorHex))
-                                .border(
-                                    width = if (selected) 2.5.dp else 1.dp,
-                                    color = if (selected) Color.White else MaterialTheme.colorScheme.outline,
-                                    shape = CircleShape
-                                )
-                                .clickable { viewModel.setPenColor(pc) }
-                                .testTag("pen_color_${pc.name.lowercase()}")
-                        )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        PenColor.entries.forEach { pc ->
+                            val selected = !uiState.isEraserActive && uiState.penColor == pc
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(pc.colorHex))
+                                    .border(
+                                        width = if (selected) 2.5.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                                        shape = CircleShape
+                                    )
+                                    .clickable { viewModel.setPenColor(pc) }
+                                    .testTag("pen_color_${pc.name.lowercase()}")
+                            )
+                        }
                     }
                 }
             }

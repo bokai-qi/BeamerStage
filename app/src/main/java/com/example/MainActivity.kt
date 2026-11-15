@@ -7,7 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -15,6 +17,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import com.example.model.AppThemeMode
 import com.example.ui.LibraryRoute
 import com.example.ui.PresenterRoute
 import com.example.ui.library.LibraryScreen
@@ -43,7 +46,28 @@ class MainActivity : ComponentActivity() {
                 .collectAsStateWithLifecycle(initialValue = com.example.model.UserPreferences())
             volumeKeysEnabled = prefs.volumeKeysNavigate
 
-            BeamerStageTheme(darkTheme = true) {
+            val darkTheme = when (prefs.themeMode) {
+                AppThemeMode.DARK -> true
+                AppThemeMode.LIGHT -> false
+                AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+            }
+
+            SideEffect {
+                enableEdgeToEdge(
+                    statusBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                    },
+                    navigationBarStyle = if (darkTheme) {
+                        SystemBarStyle.dark(Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                    }
+                )
+            }
+
+            BeamerStageTheme(darkTheme = darkTheme) {
                 val navController = rememberNavController()
 
                 NavHost(

@@ -13,6 +13,7 @@ import com.example.data.local.DeckEntity
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.PresentationRepository
 import com.example.display.ExternalDisplayController
+import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
@@ -186,6 +187,14 @@ class LibraryViewModel(
 
     fun setDefaultLaserColor(color: LaserColor) {
         viewModelScope.launch { preferencesRepository.setDefaultLaserColor(color) }
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
+    }
+
+    fun setSimplePresentingMode(enabled: Boolean) {
+        viewModelScope.launch { preferencesRepository.setSimplePresentingMode(enabled) }
     }
 
     fun dismissError() {

@@ -1,12 +1,15 @@
 package com.example
 
 import com.example.model.AnnotationStroke
+import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
 import com.example.model.NormalizedPoint
 import com.example.model.NormalizedRect
 import com.example.model.PdfLinkAction
+import com.example.model.UserPreferences
 import com.example.pdf.PdfLinkAnnotator
 import com.example.pdf.PdfLinkExtractor
+import com.example.ui.presenter.StrokeHitTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -167,5 +170,43 @@ class PresenterLogicTest {
         } finally {
             tempFile.delete()
         }
+    }
+
+    @Test
+    fun eraserHitTestRemovesTouchedPenAndHighlighterStrokes() {
+        val penStroke = AnnotationStroke(
+            id = "pen_1",
+            points = listOf(NormalizedPoint(0.20f, 0.30f), NormalizedPoint(0.50f, 0.30f)),
+            colorHex = 0xFFF43F5E,
+            strokeWidthRatio = 0.0055f,
+            isHighlighter = false
+        )
+        val markStroke = AnnotationStroke(
+            id = "mark_1",
+            points = listOf(NormalizedPoint(0.60f, 0.70f), NormalizedPoint(0.85f, 0.70f)),
+            colorHex = 0xFFF59E0B,
+            strokeWidthRatio = 0.024f,
+            isHighlighter = true
+        )
+        val strokes = listOf(penStroke, markStroke)
+
+        // Touching near midpoint of pen stroke erases only penStroke
+        val afterPenErase = StrokeHitTest.removeStrokesNear(strokes, NormalizedPoint(0.35f, 0.315f))
+        assertEquals(listOf(markStroke), afterPenErase)
+
+        // Touching far from both erases nothing
+        val afterMiss = StrokeHitTest.removeStrokesNear(strokes, NormalizedPoint(0.10f, 0.85f))
+        assertEquals(strokes, afterMiss)
+
+        // Touching near highlighter stroke removes it
+        val afterMarkErase = StrokeHitTest.removeStrokesNear(afterPenErase, NormalizedPoint(0.72f, 0.725f))
+        assertTrue(afterMarkErase.isEmpty())
+    }
+
+    @Test
+    fun userPreferencesIncludeThemeAndSimpleModeDefaults() {
+        val prefs = UserPreferences()
+        assertEquals(AppThemeMode.DARK, prefs.themeMode)
+        assertFalse(prefs.simplePresentingMode)
     }
 }
