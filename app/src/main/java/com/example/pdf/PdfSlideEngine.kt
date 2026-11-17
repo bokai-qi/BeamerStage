@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
 import com.example.model.BeamerLayoutMode
+import com.example.model.PdfOutlineEntry
 import com.example.model.PdfSlideLink
 import com.example.model.SlideBitmapPair
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +35,7 @@ class PdfSlideEngine(private val context: Context) {
     private var detectedDefaultLayout: BeamerLayoutMode = BeamerLayoutMode.SINGLE
     private var cachedRawLinksUri: String? = null
     private var cachedRawLinksByPage: Map<Int, List<PdfLinkExtractor.RawPageLink>> = emptyMap()
+    private var cachedOutlines: List<PdfOutlineEntry> = emptyList()
 
     // Adaptive LRU Bitmap Cache (up to 24 MB, scaled to 1/8th of max JVM heap)
     private val cacheBytesLimit = minOf(
@@ -112,9 +114,16 @@ class PdfSlideEngine(private val context: Context) {
 
             if (cachedSlide != null &&
                 cachedLinks != null &&
+                cachedRawLinksUri == uriString &&
                 (!includeNotesBitmap || effectiveMode == BeamerLayoutMode.SINGLE || cachedNotes != null)
             ) {
-                return@withLock SlideBitmapPair(cachedSlide, cachedNotes, effectiveMode, cachedLinks)
+                return@withLock SlideBitmapPair(
+                    slideBitmap = cachedSlide,
+                    beamerNotesBitmap = cachedNotes,
+                    effectiveLayout = effectiveMode,
+                    links = cachedLinks,
+                    outlines = cachedOutlines
+                )
             }
 
             renderer.openPage(pageIndex).use { page ->
@@ -142,10 +151,16 @@ class PdfSlideEngine(private val context: Context) {
                     null
                 }
 
-                val links = cachedLinks ?: extractLinksLocked(uriString, page, pageIndex, effectiveMode)
+                val links = extractLinksLocked(uriString, page, pageIndex, effectiveMode)
                     .also { linksCache.put(linksKey, it) }
 
-                SlideBitmapPair(slideBmp, notesBmp, effectiveMode, links)
+                SlideBitmapPair(
+                    slideBitmap = slideBmp,
+                    beamerNotesBitmap = notesBmp,
+                    effectiveLayout = effectiveMode,
+                    links = links,
+                    outlines = cachedOutlines
+                )
             }
         }
     }
@@ -320,15 +335,18 @@ class PdfSlideEngine(private val context: Context) {
     ): List<PdfSlideLink> {
         val platformLinks = PdfLinkExtractor.extractFromPlatformPage(page, effectiveLayout)
         if (cachedRawLinksUri != uriString) {
-            cachedRawLinksByPage = runCatching {
+            val metadata = runCatching {
                 val cachedFile = localCacheFileForUri(uriString)
                 val stream = if (cachedFile.exists() && cachedFile.length() > 0L) {
                     FileInputStream(cachedFile)
                 } else {
                     openPdfInputStream(uriString)
                 }
-                stream?.use { PdfLinkExtractor.extractLinksFromStream(it) } ?: emptyMap()
-            }.getOrDefault(emptyMap())
+                stream?.use { PdfLinkExtractor.extractMetadataFromStream(it) }
+                    ?: PdfLinkExtractor.PdfMetadataScan()
+            }.getOrDefault(PdfLinkExtractor.PdfMetadataScan())
+            cachedRawLinksByPage = metadata.linksByPage
+            cachedOutlines = metadata.outlines
             cachedRawLinksUri = uriString
         }
         val rawForPage = cachedRawLinksByPage[pageIndex].orEmpty()
@@ -356,6 +374,7 @@ class PdfSlideEngine(private val context: Context) {
         currentUriString = null
         cachedRawLinksUri = null
         cachedRawLinksByPage = emptyMap()
+        cachedOutlines = emptyList()
     }
 
     private fun openParcelFileDescriptor(uriString: String): ParcelFileDescriptor? {

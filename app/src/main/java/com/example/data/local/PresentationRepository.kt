@@ -31,6 +31,18 @@ class PresentationRepository(private val dao: PresentationDao) {
         dao.updateTargetDuration(deckId, minutes.coerceIn(1, 180))
     }
 
+    suspend fun renameDeck(deckId: String, newTitle: String) {
+        val trimmed = newTitle.trim()
+        if (trimmed.isNotEmpty()) {
+            dao.updateDeckTitle(deckId, trimmed)
+        }
+    }
+
+    suspend fun resetDeckProgressAndAnnotations(deckId: String) {
+        dao.updateDeckProgress(deckId, 0, System.currentTimeMillis())
+        dao.clearAllDeckAnnotations(deckId)
+    }
+
     suspend fun deleteDeckById(deckId: String) = dao.deleteDeckById(deckId)
 
     fun observeNotesMap(deckId: String): Flow<Map<Int, String>> {

@@ -2,15 +2,12 @@ package com.example.display
 
 import android.app.Activity
 import android.content.Context
-import android.graphics.Bitmap
 import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Display
-import com.example.model.AnnotationStroke
 import com.example.model.ExternalDisplayInfo
-import com.example.model.LaserPointerState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,10 +26,7 @@ class ExternalDisplayController(context: Context) {
     private var activeDisplayId: Int? = null
     private var isPresenterSessionActive: Boolean = false
 
-    private var lastBitmap: Bitmap? = null
-    private var lastStrokes: List<AnnotationStroke> = emptyList()
-    private var lastLaser: LaserPointerState = LaserPointerState()
-    private var lastBlackout: Boolean = false
+    private var lastRenderState: ProjectorRenderState = ProjectorRenderState()
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = refreshDisplays()
@@ -62,17 +56,9 @@ class ExternalDisplayController(context: Context) {
         syncPresentationWindow()
     }
 
-    fun updateOutput(
-        bitmap: Bitmap?,
-        strokes: List<AnnotationStroke>,
-        laserState: LaserPointerState,
-        isBlackout: Boolean
-    ) {
-        lastBitmap = bitmap
-        lastStrokes = strokes
-        lastLaser = laserState
-        lastBlackout = isBlackout
-        presentation?.render(bitmap, strokes, laserState, isBlackout)
+    fun updateOutput(state: ProjectorRenderState) {
+        lastRenderState = state
+        presentation?.render(state)
     }
 
     fun refreshDisplays() {
@@ -121,14 +107,14 @@ class ExternalDisplayController(context: Context) {
         }
 
         if (presentation != null && activeDisplayId == targetDisplay.displayId && presentation?.isShowing == true) {
-            presentation?.render(lastBitmap, lastStrokes, lastLaser, lastBlackout)
+            presentation?.render(lastRenderState)
             return
         }
 
         dismissPresentation()
         runCatching {
             val pres = BeamerPresentation(activity, targetDisplay)
-            pres.render(lastBitmap, lastStrokes, lastLaser, lastBlackout)
+            pres.render(lastRenderState)
             pres.show()
             presentation = pres
             activeDisplayId = targetDisplay.displayId

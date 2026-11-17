@@ -30,6 +30,9 @@ interface PresentationDao {
     @Query("UPDATE decks SET targetDurationMinutes = :minutes WHERE id = :deckId")
     suspend fun updateTargetDuration(deckId: String, minutes: Int)
 
+    @Query("UPDATE decks SET title = :title WHERE id = :deckId")
+    suspend fun updateDeckTitle(deckId: String, title: String)
+
     @Query("DELETE FROM decks WHERE id = :deckId")
     suspend fun deleteDeckById(deckId: String)
 

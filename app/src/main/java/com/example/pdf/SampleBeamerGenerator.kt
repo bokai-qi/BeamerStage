@@ -10,6 +10,7 @@ import android.graphics.pdf.PdfDocument
 import com.example.data.local.DeckEntity
 import com.example.data.local.PresentationRepository
 import com.example.model.BeamerLayoutMode
+import com.example.model.PdfOutlineEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -29,7 +30,7 @@ class SampleBeamerGenerator(
     suspend fun ensureSamplesSeeded() = withContext(Dispatchers.IO) {
         val samplesDir = File(context.filesDir, "samples").apply { mkdirs() }
 
-        val standardFile = File(samplesDir, "spectral_graph_theory_v2.pdf")
+        val standardFile = File(samplesDir, "spectral_graph_theory_v3.pdf")
         if (!standardFile.exists()) {
             createStandardBeamerPdf(standardFile)
         }
@@ -63,7 +64,7 @@ class SampleBeamerGenerator(
             }
         }
 
-        val splitFile = File(samplesDir, "beamer_split_notes_demo_v2.pdf")
+        val splitFile = File(samplesDir, "beamer_split_notes_demo_v3.pdf")
         if (!splitFile.exists()) {
             createSplitNotesBeamerPdf(splitFile)
         }
@@ -260,7 +261,15 @@ class SampleBeamerGenerator(
             pdf.writeTo(fos)
         }
         pdf.close()
-        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), linksByPage)
+        val standardOutlines = listOf(
+            PdfOutlineEntry("Title & Agenda", 0, 0),
+            PdfOutlineEntry("1. Normalized Graph Laplacian", 1, 0),
+            PdfOutlineEntry("2. Cheeger's Inequality", 2, 0),
+            PdfOutlineEntry("3. Fiedler Vector Partitioning", 3, 0),
+            PdfOutlineEntry("4. Eigenvalue Spectrum", 4, 0),
+            PdfOutlineEntry("Appendix & Open Questions", 5, 0)
+        )
+        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), linksByPage, standardOutlines)
     }
 
     private fun createSplitNotesBeamerPdf(outputFile: File) {
@@ -401,7 +410,13 @@ class SampleBeamerGenerator(
             pdf.writeTo(fos)
         }
         pdf.close()
-        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), splitLinks)
+        val splitOutlines = listOf(
+            PdfOutlineEntry("1. Dual-Screen Beamer Workflow", 0, 0),
+            PdfOutlineEntry("2. Why 32:9 Split-Page PDFs?", 1, 0),
+            PdfOutlineEntry("3. Live Math & Diagram Focus", 2, 0),
+            PdfOutlineEntry("4. Stage Execution Checklist", 3, 0)
+        )
+        PdfLinkAnnotator.appendLinksToPdf(outputFile, height.toFloat(), splitLinks, splitOutlines)
     }
 
     private inline fun drawStandardSlide(

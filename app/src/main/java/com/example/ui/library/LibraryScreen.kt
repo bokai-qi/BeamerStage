@@ -1,11 +1,13 @@
 package com.example.ui.library
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,21 +38,28 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Splitscreen
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,6 +67,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -65,10 +75,12 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -78,16 +90,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.local.DeckEntity
 import com.example.model.AppThemeMode
 import com.example.model.BeamerLayoutMode
 import com.example.model.DarkThemeStyle
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
+import com.example.model.LibrarySortOrder
 import com.example.model.UserPreferences
 import com.example.ui.theme.OledBlack
 import com.example.ui.theme.StageSurface
@@ -98,8 +113,11 @@ fun LibraryScreen(
     onOpenDeck: (String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showGuideSheet by remember { mutableStateOf(false) }
+    var deckToRename by remember { mutableStateOf<DeckEntity?>(null) }
+    var deckForDuration by remember { mutableStateOf<DeckEntity?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val pdfPickerLauncher = rememberLauncherForActivityResult(
@@ -121,14 +139,24 @@ fun LibraryScreen(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            FloatingActionButton(
+            ExtendedFloatingActionButton(
                 onClick = { pdfPickerLauncher.launch(arrayOf("application/pdf")) },
+                icon = {
+                    if (uiState.isImporting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                    }
+                },
+                text = { Text(if (uiState.isImporting) "Opening…" else "Open PDF") },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.testTag("fab_open_pdf")
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "Open PDF Presentation")
-            }
+            )
         }
     ) { innerPadding ->
         BoxWithConstraints(
@@ -167,36 +195,33 @@ fun LibraryScreen(
                 }
 
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    StageHeroCard(
-                        connectedDisplay = uiState.connectedDisplay,
-                        isImporting = uiState.isImporting,
-                        onOpenPdfClick = { pdfPickerLauncher.launch(arrayOf("application/pdf")) }
-                    )
+                    StageSignalBanner(connectedDisplay = uiState.connectedDisplay)
                 }
 
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Presentations & Beamer Demos",
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        Text(
-                            text = "${uiState.decks.size} decks",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    LibrarySearchAndSortBar(
+                        searchQuery = uiState.searchQuery,
+                        sortOrder = uiState.sortOrder,
+                        showDemoDecks = uiState.preferences.showDemoDecks,
+                        deckCount = uiState.decks.size,
+                        onSearchQueryChange = viewModel::setSearchQuery,
+                        onSelectSortOrder = viewModel::setSortOrder,
+                        onToggleDemoDecks = {
+                            viewModel.setShowDemoDecks(!uiState.preferences.showDemoDecks)
+                        }
+                    )
                 }
 
                 if (uiState.decks.isEmpty()) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         EmptyDecksCard(
+                            hasSearchFilter = uiState.searchQuery.isNotBlank() || !uiState.preferences.showDemoDecks,
+                            onClearFilter = {
+                                viewModel.setSearchQuery("")
+                                if (!uiState.preferences.showDemoDecks && uiState.totalDecksCount > 0) {
+                                    viewModel.setShowDemoDecks(true)
+                                }
+                            },
                             onOpenPdfClick = { pdfPickerLauncher.launch(arrayOf("application/pdf")) }
                         )
                     }
@@ -204,7 +229,28 @@ fun LibraryScreen(
                     items(uiState.decks, key = { it.deck.id }) { item ->
                         DeckCard(
                             item = item,
+                            isExporting = uiState.exportingDeckId == item.deck.id,
                             onClick = { onOpenDeck(item.deck.id) },
+                            onRename = { deckToRename = item.deck },
+                            onSetDuration = { deckForDuration = item.deck },
+                            onExportPdf = {
+                                viewModel.exportDeckAnnotatedPdf(context, item.deck.id) { uri, title ->
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/pdf"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        putExtra(Intent.EXTRA_SUBJECT, "$title (Annotated)")
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent.createChooser(shareIntent, "Share Annotated PDF")
+                                        )
+                                    }
+                                }
+                            },
+                            onResetProgress = {
+                                viewModel.resetDeckProgressAndAnnotations(item.deck.id)
+                            },
                             onChangeLayout = { mode ->
                                 viewModel.updateDeckLayoutMode(item.deck.id, mode)
                             },
@@ -214,7 +260,7 @@ fun LibraryScreen(
                 }
 
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    Spacer(modifier = Modifier.height(72.dp))
+                    Spacer(modifier = Modifier.height(80.dp))
                 }
             }
         }
@@ -228,6 +274,8 @@ fun LibraryScreen(
             onToggleSimplePresentingMode = viewModel::setSimplePresentingMode,
             onToggleVolumeKeys = viewModel::setVolumeKeysNavigate,
             onToggleKeepScreenOn = viewModel::setKeepScreenOn,
+            onToggleHaptics = viewModel::setHapticFeedbackEnabled,
+            onToggleShowDemos = viewModel::setShowDemoDecks,
             onSelectLaserColor = viewModel::setDefaultLaserColor,
             onChangeNoteFontSize = viewModel::setNoteFontSizeSp,
             onDismiss = { showSettingsSheet = false }
@@ -236,6 +284,30 @@ fun LibraryScreen(
 
     if (showGuideSheet) {
         BeamerGuideSheet(onDismiss = { showGuideSheet = false })
+    }
+
+    val targetRename = deckToRename
+    if (targetRename != null) {
+        RenameDeckDialog(
+            initialTitle = targetRename.title,
+            onConfirm = { updated ->
+                viewModel.renameDeck(targetRename.id, updated)
+                deckToRename = null
+            },
+            onDismiss = { deckToRename = null }
+        )
+    }
+
+    val targetDurationDeck = deckForDuration
+    if (targetDurationDeck != null) {
+        TargetDurationDialog(
+            initialMinutes = targetDurationDeck.targetDurationMinutes,
+            onConfirm = { mins ->
+                viewModel.updateTargetDuration(targetDurationDeck.id, mins)
+                deckForDuration = null
+            },
+            onDismiss = { deckForDuration = null }
+        )
     }
 }
 
@@ -326,13 +398,9 @@ private fun LibraryTopHeader(
 }
 
 @Composable
-private fun StageHeroCard(
-    connectedDisplay: ExternalDisplayInfo?,
-    isImporting: Boolean,
-    onOpenPdfClick: () -> Unit
-) {
+private fun StageSignalBanner(connectedDisplay: ExternalDisplayInfo?) {
     Surface(
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(
             width = 1.dp,
@@ -347,7 +415,7 @@ private fun StageHeroCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -358,7 +426,7 @@ private fun StageHeroCard(
                 } else {
                     MaterialTheme.colorScheme.primaryContainer
                 },
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.size(44.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
@@ -373,17 +441,17 @@ private fun StageHeroCard(
                         } else {
                             MaterialTheme.colorScheme.primary
                         },
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(21.dp)
                     )
                 }
             }
 
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
-                    text = connectedDisplay?.name ?: "USB-C DisplayPort / HDMI",
+                    text = connectedDisplay?.name ?: "USB-C DisplayPort / HDMI Stage",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -391,8 +459,8 @@ private fun StageHeroCard(
                 )
                 Text(
                     text = connectedDisplay?.let {
-                        "${it.resolutionLabel} @ ${it.refreshRate.toInt()} Hz · Ready to cast"
-                    } ?: "Import any LaTeX Beamer or PDF slide deck",
+                        "${it.resolutionLabel} @ ${it.refreshRate.toInt()} Hz · Projector locked & ready"
+                    } ?: "Auto-splits 32:9 Beamer notes · Supports clickers, hyperlinks & chalkboard",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (connectedDisplay != null) {
                         MaterialTheme.colorScheme.secondary
@@ -403,24 +471,92 @@ private fun StageHeroCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+    }
+}
 
-            Button(
-                onClick = onOpenPdfClick,
-                enabled = !isImporting,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                ),
-                modifier = Modifier.testTag("open_pdf_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PictureAsPdf,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+@Composable
+private fun LibrarySearchAndSortBar(
+    searchQuery: String,
+    sortOrder: LibrarySortOrder,
+    showDemoDecks: Boolean,
+    deckCount: Int,
+    onSearchQueryChange: (String) -> Unit,
+    onSelectSortOrder: (LibrarySortOrder) -> Unit,
+    onToggleDemoDecks: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            singleLine = true,
+            placeholder = {
+                Text(
+                    text = "Search talks & Beamer decks…",
+                    style = MaterialTheme.typography.bodyMedium
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(if (isImporting) "Loading…" else "Open PDF")
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(19.dp)
+                )
+            },
+            trailingIcon = if (searchQuery.isNotEmpty()) {
+                {
+                    IconButton(onClick = { onSearchQueryChange("") }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear search",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            } else null,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("library_search_field")
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LibrarySortOrder.entries.forEach { order ->
+                    FilterChip(
+                        selected = sortOrder == order,
+                        onClick = { onSelectSortOrder(order) },
+                        label = { Text(order.label, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("sort_chip_${order.name.lowercase()}")
+                    )
+                }
+                FilterChip(
+                    selected = showDemoDecks,
+                    onClick = onToggleDemoDecks,
+                    label = { Text("Demos", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.testTag("toggle_demo_decks_chip")
+                )
             }
+
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "$deckCount ${if (deckCount == 1) "deck" else "decks"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -428,7 +564,12 @@ private fun StageHeroCard(
 @Composable
 private fun DeckCard(
     item: LibraryDeckItem,
+    isExporting: Boolean,
     onClick: () -> Unit,
+    onRename: () -> Unit,
+    onSetDuration: () -> Unit,
+    onExportPdf: () -> Unit,
+    onResetProgress: () -> Unit,
     onChangeLayout: (BeamerLayoutMode) -> Unit,
     onDelete: () -> Unit
 ) {
@@ -504,9 +645,17 @@ private fun DeckCard(
                         )
                     }
                     Text(
-                        text = "Slide ${deck.lastPageIndex + 1}/${deck.pageCount} · ${deck.targetDurationMinutes}m",
+                        text = if (isExporting) {
+                            "Exporting PDF…"
+                        } else {
+                            "Slide ${deck.lastPageIndex + 1}/${deck.pageCount} · ${deck.targetDurationMinutes}m"
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (isExporting) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                 }
 
@@ -543,6 +692,39 @@ private fun DeckCard(
                             onClick()
                         }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Rename Deck…") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onRename()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Set Target Duration (${deck.targetDurationMinutes}m)…") },
+                        leadingIcon = { Icon(Icons.Default.Timer, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onSetDuration()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Export Annotated PDF") },
+                        leadingIcon = { Icon(Icons.Default.IosShare, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onExportPdf()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Reset Progress & Clear Ink") },
+                        leadingIcon = { Icon(Icons.Default.RestartAlt, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onResetProgress()
+                        }
+                    )
+                    HorizontalDivider()
                     BeamerLayoutMode.entries.forEach { mode ->
                         DropdownMenuItem(
                             text = {
@@ -557,6 +739,7 @@ private fun DeckCard(
                         )
                     }
                     if (!deck.isBundledSample) {
+                        HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text("Remove from Library", color = MaterialTheme.colorScheme.error) },
                             leadingIcon = {
@@ -579,7 +762,100 @@ private fun DeckCard(
 }
 
 @Composable
-private fun EmptyDecksCard(onOpenPdfClick: () -> Unit) {
+private fun RenameDeckDialog(
+    initialTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var draft by remember(initialTitle) { mutableStateOf(initialTitle) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename Presentation") },
+        text = {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                singleLine = true,
+                label = { Text("Presentation title") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("rename_deck_textfield")
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(draft) },
+                enabled = draft.trim().isNotEmpty(),
+                modifier = Modifier.testTag("confirm_rename_deck_button")
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun TargetDurationDialog(
+    initialMinutes: Int,
+    onConfirm: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedMinutes by remember(initialMinutes) { mutableIntStateOf(initialMinutes.coerceIn(1, 180)) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Talk Pacing Target") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Target duration: $selectedMinutes min",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(5, 10, 15, 20, 30, 45, 60, 90).forEach { mins ->
+                        FilterChip(
+                            selected = selectedMinutes == mins,
+                            onClick = { selectedMinutes = mins },
+                            label = { Text("${mins}m") }
+                        )
+                    }
+                }
+                Slider(
+                    value = selectedMinutes.toFloat(),
+                    onValueChange = { selectedMinutes = it.toInt().coerceIn(1, 120) },
+                    valueRange = 1f..120f
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(selectedMinutes) }) {
+                Text("Apply")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+private fun EmptyDecksCard(
+    hasSearchFilter: Boolean,
+    onClearFilter: () -> Unit,
+    onOpenPdfClick: () -> Unit
+) {
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -600,16 +876,26 @@ private fun EmptyDecksCard(onOpenPdfClick: () -> Unit) {
                 modifier = Modifier.size(40.dp)
             )
             Text(
-                text = "No PDF Slides Loaded",
+                text = if (hasSearchFilter) "No Matching Presentations" else "No PDF Slides Loaded",
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                text = "Open any compiled LaTeX Beamer PDF or standard slide deck from your device.",
+                text = if (hasSearchFilter) {
+                    "Try clearing your search filter or enabling bundled demo decks."
+                } else {
+                    "Open any compiled LaTeX Beamer PDF or standard slide deck from your device."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            OutlinedButton(onClick = onOpenPdfClick) {
-                Text("Browse Device PDFs")
+            if (hasSearchFilter) {
+                OutlinedButton(onClick = onClearFilter) {
+                    Text("Show All Decks")
+                }
+            } else {
+                OutlinedButton(onClick = onOpenPdfClick) {
+                    Text("Browse Device PDFs")
+                }
             }
         }
     }
@@ -624,6 +910,8 @@ private fun StageSettingsSheet(
     onToggleSimplePresentingMode: (Boolean) -> Unit,
     onToggleVolumeKeys: (Boolean) -> Unit,
     onToggleKeepScreenOn: (Boolean) -> Unit,
+    onToggleHaptics: (Boolean) -> Unit,
+    onToggleShowDemos: (Boolean) -> Unit,
     onSelectLaserColor: (LaserColor) -> Unit,
     onChangeNoteFontSize: (Float) -> Unit,
     onDismiss: () -> Unit
@@ -723,7 +1011,7 @@ private fun StageSettingsSheet(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Volume Buttons Advance Slides", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "Use hardware Volume Down for Next and Volume Up for Previous while presenting.",
+                        "Use hardware Volume Down for Next and Volume Up for Previous (wireless clickers always work).",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -733,6 +1021,27 @@ private fun StageSettingsSheet(
                     checked = preferences.volumeKeysNavigate,
                     onCheckedChange = onToggleVolumeKeys,
                     modifier = Modifier.testTag("switch_volume_keys")
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Tactile Haptics & Pacing Alerts", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Subtle ticks on slide steps, straight-line snap, and 85% / 100% talk timer milestones.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = preferences.hapticFeedbackEnabled,
+                    onCheckedChange = onToggleHaptics,
+                    modifier = Modifier.testTag("switch_haptics")
                 )
             }
 
@@ -754,6 +1063,27 @@ private fun StageSettingsSheet(
                     checked = preferences.keepScreenOn,
                     onCheckedChange = onToggleKeepScreenOn,
                     modifier = Modifier.testTag("switch_keep_screen_on")
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Show Bundled Demo Decks", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Display the two built-in LaTeX Beamer sample talks in your library.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = preferences.showDemoDecks,
+                    onCheckedChange = onToggleShowDemos,
+                    modifier = Modifier.testTag("switch_show_demos")
                 )
             }
 
@@ -831,6 +1161,7 @@ private fun BeamerGuideSheet(onDismiss: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -842,7 +1173,7 @@ private fun BeamerGuideSheet(onDismiss: () -> Unit) {
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                "Connect a USB-C to DisplayPort or HDMI adapter on your Pixel device. BeamerStage automatically routes clean, borderless slides, laser pointer, and annotations to the external projector while keeping your timer and notes private on your phone.",
+                "Connect a USB-C to DisplayPort or HDMI adapter on your Pixel device. BeamerStage automatically routes clean, borderless slides, laser pointer, spotlight, zoom, and chalkboard ink to the external projector while keeping your timer and notes private.",
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
@@ -863,7 +1194,17 @@ private fun BeamerGuideSheet(onDismiss: () -> Unit) {
                 )
             }
             Text(
-                "When Auto-Detect is enabled, double-wide 32:9 PDFs automatically project only the slide half and show your compiled Beamer \\note{} half on the presenter console.",
+                "When Auto-Detect is enabled, double-wide 32:9 PDFs automatically project only the slide half and show your compiled Beamer \\note{} half (with pinch-to-zoom) on the presenter console.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "3. Wireless Clicker & Keyboard Shortcuts",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                "PageDown / Right / Space: Next · PageUp / Left: Prev · B or '.': Blackout · F: Freeze · W: Chalkboard · Esc: Resume.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

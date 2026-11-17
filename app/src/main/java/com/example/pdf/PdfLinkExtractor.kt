@@ -6,6 +6,7 @@ import android.os.Build
 import com.example.model.BeamerLayoutMode
 import com.example.model.NormalizedRect
 import com.example.model.PdfLinkAction
+import com.example.model.PdfOutlineEntry
 import com.example.model.PdfSlideLink
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
@@ -32,6 +33,11 @@ object PdfLinkExtractor {
         val rightFraction: Float,
         val bottomFraction: Float,
         val action: PdfLinkAction
+    )
+
+    data class PdfMetadataScan(
+        val linksByPage: Map<Int, List<RawPageLink>> = emptyMap(),
+        val outlines: List<PdfOutlineEntry> = emptyList()
     )
 
     fun extractFromPlatformPage(
@@ -200,20 +206,28 @@ object PdfLinkExtractor {
         return extractLinksFromStream(ByteArrayInputStream(pdfBytes))
     }
 
-    /**
-     * Streaming low-memory PDF parser for link annotations (/Subtype /Link).
-     * Skips binary image/font/content streams in-place without loading the PDF into RAM,
-     * while expanding /ObjStm object streams and resolving /GoTo, /URI, and /Named actions.
-     */
+    fun extractMetadataFromPdfBytes(pdfBytes: ByteArray): PdfMetadataScan {
+        return extractMetadataFromStream(ByteArrayInputStream(pdfBytes))
+    }
+
     fun extractLinksFromStream(inputStream: InputStream): Map<Int, List<RawPageLink>> {
+        return extractMetadataFromStream(inputStream).linksByPage
+    }
+
+    /**
+     * Streaming low-memory PDF parser for link annotations (/Subtype /Link) and Beamer
+     * section bookmarks (/Outlines). Skips binary image/font/content streams in-place without
+     * loading the PDF into RAM, while expanding /ObjStm object streams.
+     */
+    fun extractMetadataFromStream(inputStream: InputStream): PdfMetadataScan {
         val scan = scanPdfObjects(inputStream)
         val objects = scan.objects
-        if (objects.isEmpty()) return emptyMap()
+        if (objects.isEmpty()) return PdfMetadataScan()
 
-        val rootRef = scan.rootObjNum ?: findCatalogObjectNumber(objects) ?: return emptyMap()
-        val catalogBody = objects[rootRef] ?: return emptyMap()
+        val rootRef = scan.rootObjNum ?: findCatalogObjectNumber(objects) ?: return PdfMetadataScan()
+        val catalogBody = objects[rootRef] ?: return PdfMetadataScan()
 
-        val pagesRootRef = extractIndirectRef(catalogBody, "/Pages") ?: return emptyMap()
+        val pagesRootRef = extractIndirectRef(catalogBody, "/Pages") ?: return PdfMetadataScan()
         val orderedPages = mutableListOf<PageNode>()
         collectPages(
             nodeObjNum = pagesRootRef,
@@ -223,7 +237,7 @@ object PdfLinkExtractor {
             visited = HashSet(),
             depth = 0
         )
-        if (orderedPages.isEmpty()) return emptyMap()
+        if (orderedPages.isEmpty()) return PdfMetadataScan()
 
         val pageNumByObj = HashMap<Int, Int>(orderedPages.size * 2)
         orderedPages.forEachIndexed { idx, node ->
@@ -281,7 +295,16 @@ object PdfLinkExtractor {
                 linksByPage[pageIndex] = pageLinks
             }
         }
-        return linksByPage
+
+        val outlines = collectOutlines(
+            catalogBody = catalogBody,
+            objects = objects,
+            pageNumByObj = pageNumByObj,
+            namedDests = namedDests,
+            totalPages = orderedPages.size
+        )
+
+        return PdfMetadataScan(linksByPage = linksByPage, outlines = outlines)
     }
 
     private data class PageNode(
@@ -531,6 +554,10 @@ object PdfLinkExtractor {
             body.contains("/Annots") ||
             body.contains("/Names") ||
             body.contains("/Dests") ||
+            body.contains("/Outlines") ||
+            body.contains("/Title") ||
+            body.contains("/First") ||
+            body.contains("/Next") ||
             body.contains("/GoTo") ||
             body.contains("/URI") ||
             body.contains("/Named") ||
@@ -1027,29 +1054,126 @@ object PdfLinkExtractor {
             val bytes = ByteArray(clean.length / 2) { idx ->
                 clean.substring(idx * 2, idx * 2 + 2).toIntOrNull(16)?.toByte() ?: 0
             }
-            return String(bytes, StandardCharsets.UTF_8)
+            return decodePdfStringBytes(bytes)
         }
         return null
     }
 
+    private fun decodePdfStringBytes(bytes: ByteArray): String {
+        if (bytes.size >= 2 &&
+            (bytes[0].toInt() and 0xFF) == 0xFE &&
+            (bytes[1].toInt() and 0xFF) == 0xFF
+        ) {
+            return String(bytes, 2, bytes.size - 2, StandardCharsets.UTF_16BE)
+        }
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
+    private fun collectOutlines(
+        catalogBody: String,
+        objects: Map<Int, String>,
+        pageNumByObj: Map<Int, Int>,
+        namedDests: Map<String, Int>,
+        totalPages: Int
+    ): List<PdfOutlineEntry> {
+        val outlinesRootRef = extractIndirectRef(catalogBody, "/Outlines") ?: return emptyList()
+        val outlinesRootBody = objects[outlinesRootRef] ?: return emptyList()
+        val firstRef = extractIndirectRef(outlinesRootBody, "/First") ?: return emptyList()
+        val out = mutableListOf<PdfOutlineEntry>()
+        traverseOutlineSiblings(
+            firstObjNum = firstRef,
+            objects = objects,
+            pageNumByObj = pageNumByObj,
+            namedDests = namedDests,
+            totalPages = totalPages,
+            level = 0,
+            out = out,
+            visited = HashSet()
+        )
+        return out
+    }
+
+    private fun traverseOutlineSiblings(
+        firstObjNum: Int,
+        objects: Map<Int, String>,
+        pageNumByObj: Map<Int, Int>,
+        namedDests: Map<String, Int>,
+        totalPages: Int,
+        level: Int,
+        out: MutableList<PdfOutlineEntry>,
+        visited: MutableSet<Int>
+    ) {
+        if (level > 8 || out.size >= 256) return
+        var currentObj: Int? = firstObjNum
+        while (currentObj != null && out.size < 256) {
+            if (!visited.add(currentObj)) break
+            val body = objects[currentObj] ?: break
+            val rawTitle = extractPdfString(body, "/Title")?.trim()
+            val action = resolveAnnotAction(
+                annotBody = body,
+                objects = objects,
+                pageNumByObj = pageNumByObj,
+                namedDests = namedDests,
+                currentPageIndex = 0,
+                totalPages = totalPages
+            )
+            val targetPage = (action as? PdfLinkAction.GoToPage)?.pageIndex
+            if (!rawTitle.isNullOrBlank() && targetPage != null && targetPage in 0 until totalPages) {
+                out.add(PdfOutlineEntry(title = rawTitle, pageIndex = targetPage, level = level))
+            }
+            val childFirst = extractIndirectRef(body, "/First")
+            if (childFirst != null && childFirst != currentObj) {
+                traverseOutlineSiblings(
+                    firstObjNum = childFirst,
+                    objects = objects,
+                    pageNumByObj = pageNumByObj,
+                    namedDests = namedDests,
+                    totalPages = totalPages,
+                    level = level + 1,
+                    out = out,
+                    visited = visited
+                )
+            }
+            currentObj = extractIndirectRef(body, "/Next")
+        }
+    }
+
     private fun unescapePdfString(raw: String): String {
-        val sb = StringBuilder(raw.length)
+        val baos = ByteArrayOutputStream(raw.length)
         var i = 0
         while (i < raw.length) {
             val c = raw[i]
             if (c == '\\' && i + 1 < raw.length) {
-                when (val next = raw[i + 1]) {
-                    'n' -> { sb.append('\n'); i += 2 }
-                    'r' -> { sb.append('\r'); i += 2 }
-                    't' -> { sb.append('\t'); i += 2 }
-                    '\\', '(', ')' -> { sb.append(next); i += 2 }
-                    else -> { sb.append(next); i += 2 }
+                val next = raw[i + 1]
+                when {
+                    next == 'n' -> { baos.write('\n'.code); i += 2 }
+                    next == 'r' -> { baos.write('\r'.code); i += 2 }
+                    next == 't' -> { baos.write('\t'.code); i += 2 }
+                    next == '\\' || next == '(' || next == ')' -> { baos.write(next.code); i += 2 }
+                    next in '0'..'7' -> {
+                        var octLen = 1
+                        while (octLen < 3 && i + 1 + octLen < raw.length && raw[i + 1 + octLen] in '0'..'7') {
+                            octLen++
+                        }
+                        val octStr = raw.substring(i + 1, i + 1 + octLen)
+                        val byteVal = octStr.toIntOrNull(8) ?: 0
+                        baos.write(byteVal and 0xFF)
+                        i += 1 + octLen
+                    }
+                    else -> { baos.write(next.code); i += 2 }
                 }
             } else {
-                sb.append(c)
+                baos.write(c.code and 0xFF)
                 i++
             }
         }
-        return sb.toString()
+        val bytes = baos.toByteArray()
+        if (bytes.size >= 2 &&
+            (bytes[0].toInt() and 0xFF) == 0xFE &&
+            (bytes[1].toInt() and 0xFF) == 0xFF
+        ) {
+            return String(bytes, 2, bytes.size - 2, StandardCharsets.UTF_16BE)
+        }
+        return String(bytes, StandardCharsets.ISO_8859_1)
     }
 }

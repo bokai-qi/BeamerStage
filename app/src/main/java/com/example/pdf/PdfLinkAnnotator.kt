@@ -1,13 +1,13 @@
 package com.example.pdf
 
+import com.example.model.PdfOutlineEntry
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.charset.StandardCharsets
 
 /**
- * Appends standard ISO-32000 PDF Link annotations (/Subtype /Link) to an existing PDF
- * using a clean incremental update so generated sample Beamer decks include real clickable
- * TOC links, Beamer goto/return buttons, and bottom-right navigation bar links.
+ * Appends standard ISO-32000 PDF Link annotations (/Subtype /Link) and Beamer section
+ * bookmarks (/Outlines) to an existing PDF using a clean incremental update.
  */
 object PdfLinkAnnotator {
 
@@ -30,9 +30,10 @@ object PdfLinkAnnotator {
     fun appendLinksToPdf(
         pdfFile: File,
         pageHeightPt: Float,
-        linksByPage: Map<Int, List<SampleLinkSpec>>
+        linksByPage: Map<Int, List<SampleLinkSpec>>,
+        outlines: List<PdfOutlineEntry> = emptyList()
     ) {
-        if (linksByPage.isEmpty() || !pdfFile.exists()) return
+        if ((linksByPage.isEmpty() && outlines.isEmpty()) || !pdfFile.exists()) return
         val originalBytes = pdfFile.readBytes()
         val text = String(originalBytes, StandardCharsets.ISO_8859_1)
 
@@ -43,16 +44,19 @@ object PdfLinkAnnotator {
         val prevStartXref = Regex("""startxref\s+(\d+)""").findAll(text).lastOrNull()
             ?.groupValues?.get(1)?.toIntOrNull() ?: return
 
-        // Find page objects in order
+        var catalogBody: String? = null
         val pageEntries = mutableListOf<Pair<Int, String>>()
         val objRegex = Regex("""(?:^|[\r\n])\s*(\d+)\s+0\s+obj\b(.*?)endobj""", RegexOption.DOT_MATCHES_ALL)
         objRegex.findAll(text).forEach { m ->
             val objNum = m.groupValues[1].toIntOrNull() ?: return@forEach
-            val body = m.groupValues[2]
+            val body = m.groupValues[2].trim()
+            if (objNum == rootRef) {
+                catalogBody = body
+            }
             if (Regex("""/Type\s*/Page\b""").containsMatchIn(body) &&
                 !Regex("""/Type\s*/Pages\b""").containsMatchIn(body)
             ) {
-                pageEntries.add(objNum to body.trim())
+                pageEntries.add(objNum to body)
             }
         }
         if (pageEntries.isEmpty()) return
@@ -76,7 +80,7 @@ object PdfLinkAnnotator {
                         "<< /S /GoTo /D [$targetPageObj 0 R /Fit] >>"
                     }
                     is SampleLinkTarget.OpenUri -> {
-                        "<< /S /URI /URI (${t.uri}) >>"
+                        "<< /S /URI /URI (${escapePdfLiteral(t.uri)}) >>"
                     }
                 }
                 updatedObjects[annotObjNum] =
@@ -86,9 +90,30 @@ object PdfLinkAnnotator {
 
             if (annotRefs.isNotEmpty()) {
                 val refsList = annotRefs.joinToString(" ") { "$it 0 R" }
-                val updatedBody = insertAnnotsIntoDict(originalPageBody, refsList)
+                val updatedBody = insertKeyIntoDict(originalPageBody, "/Annots [$refsList]")
                 updatedObjects[pageObjNum] = updatedBody
             }
+        }
+
+        // Optional flat/section PDF /Outlines tree
+        val validOutlines = outlines.filter { it.pageIndex in pageEntries.indices }
+        val currentCatalog = catalogBody
+        if (validOutlines.isNotEmpty() && currentCatalog != null) {
+            val outlinesRootObj = nextObjNum++
+            val itemObjNums = validOutlines.map { nextObjNum++ }
+
+            validOutlines.forEachIndexed { idx, entry ->
+                val objNum = itemObjNums[idx]
+                val targetPageObj = pageEntries[entry.pageIndex].first
+                val prevPart = if (idx > 0) " /Prev ${itemObjNums[idx - 1]} 0 R" else ""
+                val nextPart = if (idx + 1 < itemObjNums.size) " /Next ${itemObjNums[idx + 1]} 0 R" else ""
+                updatedObjects[objNum] =
+                    "<< /Title (${escapePdfLiteral(entry.title)}) /Parent $outlinesRootObj 0 R$prevPart$nextPart /Dest [$targetPageObj 0 R /Fit] >>"
+            }
+
+            updatedObjects[outlinesRootObj] =
+                "<< /Type /Outlines /First ${itemObjNums.first()} 0 R /Last ${itemObjNums.last()} 0 R /Count ${itemObjNums.size} >>"
+            updatedObjects[rootRef] = insertKeyIntoDict(currentCatalog, "/Outlines $outlinesRootObj 0 R")
         }
 
         if (updatedObjects.isEmpty()) return
@@ -109,7 +134,6 @@ object PdfLinkAnnotator {
         val newStartXref = out.size()
         val xrefSb = StringBuilder()
         xrefSb.append("xref\n")
-        // Write individual 1-entry xref subsections for clean incremental update
         for ((objNum, offset) in offsets.entries.sortedBy { it.key }) {
             xrefSb.append("$objNum 1\n")
             xrefSb.append(String.format(java.util.Locale.US, "%010d 00000 n \n", offset))
@@ -124,11 +148,18 @@ object PdfLinkAnnotator {
         pdfFile.writeBytes(out.toByteArray())
     }
 
-    private fun insertAnnotsIntoDict(dictBody: String, refsList: String): String {
+    private fun escapePdfLiteral(raw: String): String {
+        return raw
+            .replace("\\", "\\\\")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+    }
+
+    private fun insertKeyIntoDict(dictBody: String, keyVal: String): String {
         val lastClose = dictBody.lastIndexOf(">>")
         if (lastClose < 0) return dictBody
         val prefix = dictBody.substring(0, lastClose).trimEnd()
         val suffix = dictBody.substring(lastClose)
-        return "$prefix /Annots [$refsList] $suffix"
+        return "$prefix $keyVal $suffix"
     }
 }

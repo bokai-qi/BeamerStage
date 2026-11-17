@@ -344,4 +344,136 @@ class PresenterLogicTest {
         assertEquals("goto_0_0", merged[0].id)
         assertEquals("raw_0_1", merged[1].id)
     }
+
+    @Test
+    fun pdfMetadataExtractorParsesHierarchicalOutlinesAndUtf16Titles() {
+        // UTF-16BE with BOM (FEFF) for "Appendix α"
+        val utf16Hex = "FEFF0041007000700065006E006400690078002003B1"
+        val samplePdf = """
+            %PDF-1.4
+            1 0 obj
+            << /Type /Catalog /Pages 2 0 R /Outlines 10 0 R >>
+            endobj
+            2 0 obj
+            << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 960 540] >>
+            endobj
+            3 0 obj
+            << /Type /Page /Parent 2 0 R >>
+            endobj
+            4 0 obj
+            << /Type /Page /Parent 2 0 R >>
+            endobj
+            5 0 obj
+            << /Type /Page /Parent 2 0 R >>
+            endobj
+            10 0 obj
+            << /Type /Outlines /First 11 0 R /Last 13 0 R /Count 3 >>
+            endobj
+            11 0 obj
+            << /Title (1. Introduction) /Parent 10 0 R /Next 13 0 R /First 12 0 R /Last 12 0 R /Dest [3 0 R /Fit] >>
+            endobj
+            12 0 obj
+            << /Title (1.1 Setup & Notation) /Parent 11 0 R /A << /S /GoTo /D [4 0 R /Fit] >> >>
+            endobj
+            13 0 obj
+            << /Title <$utf16Hex> /Parent 10 0 R /Prev 11 0 R /Dest [5 0 R /Fit] >>
+            endobj
+            trailer
+            << /Size 14 /Root 1 0 R >>
+            %%EOF
+        """.trimIndent().toByteArray(StandardCharsets.ISO_8859_1)
+
+        val metadata = PdfLinkExtractor.extractMetadataFromPdfBytes(samplePdf)
+        assertEquals(3, metadata.outlines.size)
+
+        assertEquals("1. Introduction", metadata.outlines[0].title)
+        assertEquals(0, metadata.outlines[0].pageIndex)
+        assertEquals(0, metadata.outlines[0].level)
+
+        assertEquals("1.1 Setup & Notation", metadata.outlines[1].title)
+        assertEquals(1, metadata.outlines[1].pageIndex)
+        assertEquals(1, metadata.outlines[1].level)
+
+        assertEquals("Appendix α", metadata.outlines[2].title)
+        assertEquals(2, metadata.outlines[2].pageIndex)
+        assertEquals(0, metadata.outlines[2].level)
+    }
+
+    @Test
+    fun pdfLinkAnnotatorWritesOutlinesAndRoundTripsMetadata() {
+        val basePdf = """
+            %PDF-1.4
+            1 0 obj
+            << /Type /Catalog /Pages 2 0 R >>
+            endobj
+            2 0 obj
+            << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 960 540] >>
+            endobj
+            3 0 obj
+            << /Type /Page /Parent 2 0 R >>
+            endobj
+            4 0 obj
+            << /Type /Page /Parent 2 0 R >>
+            endobj
+            xref
+            0 5
+            0000000000 65535 f 
+            trailer
+            << /Size 5 /Root 1 0 R >>
+            startxref
+            123
+            %%EOF
+        """.trimIndent()
+
+        val tempFile = File.createTempFile("annot_outlines_test", ".pdf")
+        try {
+            tempFile.writeText(basePdf, StandardCharsets.ISO_8859_1)
+            PdfLinkAnnotator.appendLinksToPdf(
+                pdfFile = tempFile,
+                pageHeightPt = 540f,
+                linksByPage = emptyMap(),
+                outlines = listOf(
+                    com.example.model.PdfOutlineEntry("Overview", 0),
+                    com.example.model.PdfOutlineEntry("Main Theorem", 1)
+                )
+            )
+            val meta = PdfLinkExtractor.extractMetadataFromPdfBytes(tempFile.readBytes())
+            assertEquals(2, meta.outlines.size)
+            assertEquals("Overview", meta.outlines[0].title)
+            assertEquals(0, meta.outlines[0].pageIndex)
+            assertEquals("Main Theorem", meta.outlines[1].title)
+            assertEquals(1, meta.outlines[1].pageIndex)
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    @Test
+    fun stageModelsIncludeSpotlightCharcoalInkAndZoomDetection() {
+        assertTrue(com.example.model.PenColor.entries.any { it == com.example.model.PenColor.CHARCOAL })
+        assertEquals(3, com.example.model.PenStrokeWidth.entries.size)
+        assertTrue(com.example.model.InteractionTool.entries.contains(com.example.model.InteractionTool.SPOTLIGHT))
+        assertFalse(com.example.model.SlideViewportState(scale = 1f).isZoomed)
+        assertTrue(com.example.model.SlideViewportState(scale = 1.8f).isZoomed)
+    }
+
+    @Test
+    fun clampViewportPanKeepsSlideCenteredWhenZoomedOutAndEdgeToEdgeWhenZoomedIn() {
+        // At 1.0x scale, pan always snaps to 0f
+        assertEquals(0f, com.example.ui.components.clampViewportPan(0.3f, 1.0f, 1000f, 1000f), 0.0001f)
+
+        // When zoomed slide along an axis is still smaller than container (e.g. tall Focus container), keep centered (0f)
+        assertEquals(0f, com.example.ui.components.clampViewportPan(0.25f, 1.4f, 840f, 1600f), 0.0001f)
+
+        // When zoomed slide exceeds container (e.g. 2000px drawn inside 1000px container), maxPan = (2000 - 1000)/(2*2000) = 0.25f
+        val clampedPos = com.example.ui.components.clampViewportPan(0.45f, 2.0f, 2000f, 1000f)
+        assertEquals(0.25f, clampedPos, 0.0001f)
+        val leftAtMax = (1000f / 2f + clampedPos * 2000f) - 2000f / 2f
+        assertEquals(0f, leftAtMax, 0.01f) // Left edge touches 0px with zero background gap
+
+        val clampedNeg = com.example.ui.components.clampViewportPan(-0.45f, 2.0f, 2000f, 1000f)
+        assertEquals(-0.25f, clampedNeg, 0.0001f)
+        val rightAtMin = (1000f / 2f + clampedNeg * 2000f) + 2000f / 2f
+        assertEquals(1000f, rightAtMin, 0.01f) // Right edge touches containerW with zero background gap
+    }
 }

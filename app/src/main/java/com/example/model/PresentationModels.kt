@@ -33,8 +33,9 @@ enum class BeamerLayoutMode(
 enum class InteractionTool(val label: String) {
     NAVIGATE("Navigate"),
     LASER("Laser"),
+    SPOTLIGHT("Spot"),
     PEN("Pen"),
-    HIGHLIGHTER("Highlight")
+    HIGHLIGHTER("Mark")
 }
 
 enum class LaserColor(val colorHex: Long, val label: String) {
@@ -45,10 +46,21 @@ enum class LaserColor(val colorHex: Long, val label: String) {
 
 enum class PenColor(val colorHex: Long, val label: String) {
     CRIMSON(0xFFF43F5E, "Crimson"),
+    CHARCOAL(0xFF1E293B, "Ink"),
     SKY(0xFF38BDF8, "Sky"),
     AMBER(0xFFF59E0B, "Amber"),
     EMERALD(0xFF10B981, "Emerald"),
     WHITE(0xFFF8FAFC, "White")
+}
+
+enum class PenStrokeWidth(
+    val penRatio: Float,
+    val highlighterRatio: Float,
+    val label: String
+) {
+    FINE(0.0032f, 0.015f, "Fine"),
+    MEDIUM(0.0055f, 0.024f, "Med"),
+    BOLD(0.0095f, 0.038f, "Bold")
 }
 
 @Serializable
@@ -72,6 +84,51 @@ data class LaserPointerState(
     val color: LaserColor = LaserColor.CRIMSON,
     val isActive: Boolean = false
 )
+
+data class SpotlightState(
+    val position: NormalizedPoint? = null,
+    val radiusRatio: Float = 0.16f,
+    val isActive: Boolean = false
+)
+
+data class SlideViewportState(
+    val scale: Float = 1f,
+    val panX: Float = 0f,
+    val panY: Float = 0f,
+    val mirrorToProjector: Boolean = true
+) {
+    val isZoomed: Boolean get() = scale > 1.02f
+}
+
+enum class ChalkboardStyle(
+    val bgHex: Long,
+    val isLight: Boolean,
+    val showDotGrid: Boolean,
+    val label: String
+) {
+    DARK_SLATE(0xFF0F172A, isLight = false, showDotGrid = false, label = "Slate"),
+    DOT_GRID(0xFF111827, isLight = false, showDotGrid = true, label = "Grid"),
+    PAPER_WHITE(0xFFF8FAFC, isLight = true, showDotGrid = false, label = "White")
+}
+
+data class ChalkboardState(
+    val isActive: Boolean = false,
+    val style: ChalkboardStyle = ChalkboardStyle.DARK_SLATE,
+    val boardIndex: Int = 0,
+    val totalBoards: Int = 1
+)
+
+enum class TimerDisplayMode(val label: String) {
+    ELAPSED("Elapsed"),
+    REMAINING("Left"),
+    CLOCK("Clock")
+}
+
+enum class LibrarySortOrder(val label: String) {
+    RECENT("Recent"),
+    TITLE("Title"),
+    PAGES("Slides")
+}
 
 data class ExternalDisplayInfo(
     val displayId: Int,
@@ -102,7 +159,11 @@ data class UserPreferences(
     val showTimerBar: Boolean = true,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
     val darkThemeStyle: DarkThemeStyle = DarkThemeStyle.STAGE,
-    val simplePresentingMode: Boolean = false
+    val simplePresentingMode: Boolean = false,
+    val hapticFeedbackEnabled: Boolean = true,
+    val showDemoDecks: Boolean = true,
+    val timerDisplayMode: TimerDisplayMode = TimerDisplayMode.ELAPSED,
+    val portraitNotesWeight: Float = 0.62f
 )
 
 @Serializable
@@ -129,10 +190,16 @@ data class PdfSlideLink(
     val action: PdfLinkAction
 )
 
+data class PdfOutlineEntry(
+    val title: String,
+    val pageIndex: Int,
+    val level: Int = 0
+)
+
 data class SlideBitmapPair(
     val slideBitmap: Bitmap?,
     val beamerNotesBitmap: Bitmap?,
     val effectiveLayout: BeamerLayoutMode,
-    val links: List<PdfSlideLink> = emptyList()
+    val links: List<PdfSlideLink> = emptyList(),
+    val outlines: List<PdfOutlineEntry> = emptyList()
 )
-

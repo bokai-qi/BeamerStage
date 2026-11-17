@@ -18,17 +18,24 @@ import com.example.model.BeamerLayoutMode
 import com.example.model.DarkThemeStyle
 import com.example.model.ExternalDisplayInfo
 import com.example.model.LaserColor
+import com.example.model.LibrarySortOrder
 import com.example.model.UserPreferences
+import com.example.pdf.AnnotatedPdfExporter
 import com.example.pdf.PdfSlideEngine
 import com.example.pdf.SampleBeamerGenerator
+import java.io.File
+import java.io.FileOutputStream
+import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.security.MessageDigest
+import kotlinx.coroutines.withContext
 
 data class LibraryDeckItem(
     val deck: DeckEntity,
@@ -38,10 +45,22 @@ data class LibraryDeckItem(
 
 data class LibraryUiState(
     val decks: List<LibraryDeckItem> = emptyList(),
+    val totalDecksCount: Int = 0,
+    val searchQuery: String = "",
+    val sortOrder: LibrarySortOrder = LibrarySortOrder.RECENT,
     val connectedDisplay: ExternalDisplayInfo? = null,
     val preferences: UserPreferences = UserPreferences(),
     val isImporting: Boolean = false,
+    val exportingDeckId: String? = null,
     val errorMessage: String? = null
+)
+
+private data class FilterSortState(
+    val query: String = "",
+    val sortOrder: LibrarySortOrder = LibrarySortOrder.RECENT,
+    val isImporting: Boolean = false,
+    val exportingDeckId: String? = null,
+    val message: String? = null
 )
 
 class LibraryViewModel(
@@ -54,16 +73,27 @@ class LibraryViewModel(
 ) : ViewModel() {
 
     private val thumbnails = MutableStateFlow<Map<String, Bitmap?>>(emptyMap())
-    private val statusState = MutableStateFlow<Pair<Boolean, String?>>(false to null)
+    private val filterSortState = MutableStateFlow(FilterSortState())
 
     val uiState: StateFlow<LibraryUiState> = combine(
         repository.allDecks,
         thumbnails,
         displayController.connectedDisplay,
         preferencesRepository.userPreferences,
-        statusState
-    ) { decks, thumbMap, display, prefs, (importing, error) ->
-        val items = decks.map { deck ->
+        filterSortState
+    ) { decks, thumbMap, display, prefs, uiFilter ->
+        val visibleDecks = decks.filter { deck ->
+            (prefs.showDemoDecks || !deck.isBundledSample) &&
+                (uiFilter.query.isBlank() || deck.title.contains(uiFilter.query.trim(), ignoreCase = true))
+        }
+
+        val sortedDecks = when (uiFilter.sortOrder) {
+            LibrarySortOrder.RECENT -> visibleDecks.sortedByDescending { it.lastOpenedAt }
+            LibrarySortOrder.TITLE -> visibleDecks.sortedBy { it.title.lowercase() }
+            LibrarySortOrder.PAGES -> visibleDecks.sortedByDescending { it.pageCount }
+        }
+
+        val items = sortedDecks.map { deck ->
             val mode = BeamerLayoutMode.entries.firstOrNull { it.name == deck.layoutModeName }
                 ?: BeamerLayoutMode.AUTO
             LibraryDeckItem(
@@ -72,12 +102,17 @@ class LibraryViewModel(
                 thumbnail = thumbMap[deck.id]
             )
         }
+
         LibraryUiState(
             decks = items,
+            totalDecksCount = decks.size,
+            searchQuery = uiFilter.query,
+            sortOrder = uiFilter.sortOrder,
             connectedDisplay = display,
             preferences = prefs,
-            isImporting = importing,
-            errorMessage = error
+            isImporting = uiFilter.isImporting,
+            exportingDeckId = uiFilter.exportingDeckId,
+            errorMessage = uiFilter.message
         )
     }.stateIn(
         scope = viewModelScope,
@@ -107,25 +142,48 @@ class LibraryViewModel(
         }
     }
 
+    fun setSearchQuery(query: String) {
+        filterSortState.update { it.copy(query = query) }
+    }
+
+    fun setSortOrder(order: LibrarySortOrder) {
+        filterSortState.update { it.copy(sortOrder = order) }
+    }
+
     fun importPdfUri(uri: Uri, onDeckReady: (String) -> Unit) {
         viewModelScope.launch {
-            statusState.value = true to null
+            filterSortState.update { it.copy(isImporting = true, message = null) }
             runCatching {
-                runCatching {
-                    appContext.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+                val displayTitle = resolveFileName(uri)
+                    .removeSuffix(".pdf")
+                    .removeSuffix(".PDF")
+                    .ifBlank { "Untitled Beamer Talk" }
+
+                val persistedOk = if (uri.scheme == "content") {
+                    runCatching {
+                        appContext.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        true
+                    }.getOrDefault(false)
+                } else {
+                    true
                 }
-                val uriStr = uri.toString()
-                val title = resolveFileName(uri).removeSuffix(".pdf").ifBlank { "Untitled Beamer Talk" }
-                val (pageCount, detectedMode) = pdfEngine.inspectPageCountAndTitle(uriStr)
-                val deckId = sha256Short(uriStr)
+
+                val finalUriStr = if (persistedOk) {
+                    uri.toString()
+                } else {
+                    copyIncomingUriToAppStorage(uri)
+                }
+
+                val (pageCount, detectedMode) = pdfEngine.inspectPageCountAndTitle(finalUriStr)
+                val deckId = sha256Short(finalUriStr)
                 val existing = repository.getDeckById(deckId)
                 val entity = DeckEntity(
                     id = deckId,
-                    uriString = uriStr,
-                    title = title,
+                    uriString = finalUriStr,
+                    title = existing?.title ?: displayTitle,
                     pageCount = pageCount,
                     lastPageIndex = existing?.lastPageIndex?.coerceIn(0, (pageCount - 1).coerceAtLeast(0)) ?: 0,
                     layoutModeName = existing?.layoutModeName
@@ -141,10 +199,80 @@ class LibraryViewModel(
                 repository.upsertDeck(entity)
                 deckId
             }.onSuccess { deckId ->
-                statusState.value = false to null
+                filterSortState.update { it.copy(isImporting = false, message = null) }
                 onDeckReady(deckId)
             }.onFailure { err ->
-                statusState.value = false to (err.localizedMessage ?: "Failed to open PDF document")
+                filterSortState.update {
+                    it.copy(
+                        isImporting = false,
+                        message = err.localizedMessage ?: "Failed to open PDF document"
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun copyIncomingUriToAppStorage(uri: Uri): String = withContext(Dispatchers.IO) {
+        val dir = File(appContext.filesDir, "imported_pdfs").apply { mkdirs() }
+        val fileId = sha256Short(uri.toString())
+        val outFile = File(dir, "$fileId.pdf")
+        appContext.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(outFile).use { output ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buf)
+                    if (read < 0) break
+                    output.write(buf, 0, read)
+                }
+            }
+        } ?: throw IllegalStateException("Unable to read shared PDF stream.")
+        Uri.fromFile(outFile).toString()
+    }
+
+    fun renameDeck(deckId: String, newTitle: String) {
+        viewModelScope.launch {
+            repository.renameDeck(deckId, newTitle)
+        }
+    }
+
+    fun resetDeckProgressAndAnnotations(deckId: String) {
+        viewModelScope.launch {
+            repository.resetDeckProgressAndAnnotations(deckId)
+            filterSortState.update { it.copy(message = "Slide progress and ink cleared.") }
+        }
+    }
+
+    fun exportDeckAnnotatedPdf(
+        context: Context,
+        deckId: String,
+        onShareReady: (Uri, String) -> Unit
+    ) {
+        if (filterSortState.value.exportingDeckId != null) return
+        viewModelScope.launch {
+            val deck = repository.getDeckById(deckId) ?: return@launch
+            filterSortState.update { it.copy(exportingDeckId = deckId, message = null) }
+            runCatching {
+                val mode = BeamerLayoutMode.entries.firstOrNull { it.name == deck.layoutModeName }
+                    ?: BeamerLayoutMode.AUTO
+                val annotations = repository.observeAnnotationsMap(deckId).first()
+                val uri = AnnotatedPdfExporter.exportDeckWithAnnotations(
+                    context = context.applicationContext,
+                    pdfEngine = pdfEngine,
+                    deck = deck,
+                    requestedMode = mode,
+                    annotationsByPage = annotations
+                )
+                uri to deck.title
+            }.onSuccess { (uri, title) ->
+                filterSortState.update { it.copy(exportingDeckId = null) }
+                onShareReady(uri, title)
+            }.onFailure { err ->
+                filterSortState.update {
+                    it.copy(
+                        exportingDeckId = null,
+                        message = err.localizedMessage ?: "Failed to export annotated PDF."
+                    )
+                }
             }
         }
     }
@@ -152,7 +280,6 @@ class LibraryViewModel(
     fun updateDeckLayoutMode(deckId: String, mode: BeamerLayoutMode) {
         viewModelScope.launch {
             repository.updateDeckLayoutMode(deckId, mode)
-            // Refresh thumbnail for updated crop
             val deck = repository.getDeckById(deckId) ?: return@launch
             val bmp = runCatching {
                 pdfEngine.renderThumbnail(deck.uriString, 0, mode, 380)
@@ -169,8 +296,21 @@ class LibraryViewModel(
 
     fun deleteDeck(deckId: String) {
         viewModelScope.launch {
+            val deck = repository.getDeckById(deckId)
             repository.deleteDeckById(deckId)
             thumbnails.update { it - deckId }
+            // Clean up internally copied PDF if it came from a non-persistable intent
+            deck?.uriString?.let { uriStr ->
+                runCatching {
+                    val parsed = Uri.parse(uriStr)
+                    if (parsed.scheme == "file") {
+                        val f = File(parsed.path.orEmpty())
+                        if (f.parentFile?.name == "imported_pdfs" && f.exists()) {
+                            f.delete()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -180,6 +320,14 @@ class LibraryViewModel(
 
     fun setKeepScreenOn(enabled: Boolean) {
         viewModelScope.launch { preferencesRepository.setKeepScreenOn(enabled) }
+    }
+
+    fun setHapticFeedbackEnabled(enabled: Boolean) {
+        viewModelScope.launch { preferencesRepository.setHapticFeedbackEnabled(enabled) }
+    }
+
+    fun setShowDemoDecks(enabled: Boolean) {
+        viewModelScope.launch { preferencesRepository.setShowDemoDecks(enabled) }
     }
 
     fun setNoteFontSizeSp(sizeSp: Float) {
@@ -197,7 +345,6 @@ class LibraryViewModel(
     fun setDarkThemeStyle(style: DarkThemeStyle) {
         viewModelScope.launch {
             preferencesRepository.setDarkThemeStyle(style)
-            // If currently explicitly on Light mode, switch into Dark so user sees the selected dark style immediately
             if (uiState.value.preferences.themeMode == AppThemeMode.LIGHT) {
                 preferencesRepository.setThemeMode(AppThemeMode.DARK)
             }
@@ -209,7 +356,7 @@ class LibraryViewModel(
     }
 
     fun dismissError() {
-        statusState.value = statusState.value.first to null
+        filterSortState.update { it.copy(message = null) }
     }
 
     private fun resolveFileName(uri: Uri): String {

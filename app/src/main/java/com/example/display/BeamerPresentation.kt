@@ -2,7 +2,6 @@ package com.example.display
 
 import android.app.Presentation
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
@@ -11,8 +10,6 @@ import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.example.model.AnnotationStroke
-import com.example.model.LaserPointerState
 
 class BeamerPresentation(
     outerContext: Context,
@@ -20,10 +17,7 @@ class BeamerPresentation(
 ) : Presentation(outerContext, display) {
 
     private var stageView: ProjectorStageView? = null
-    private var pendingBitmap: Bitmap? = null
-    private var pendingStrokes: List<AnnotationStroke> = emptyList()
-    private var pendingLaser: LaserPointerState = LaserPointerState()
-    private var pendingBlackout: Boolean = false
+    private var pendingState: ProjectorRenderState = ProjectorRenderState()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,19 +34,11 @@ class BeamerPresentation(
         val view = ProjectorStageView(context)
         stageView = view
         setContentView(view)
-        view.updateStage(pendingBitmap, pendingStrokes, pendingLaser, pendingBlackout)
+        view.updateStage(pendingState)
     }
 
-    fun render(
-        bitmap: Bitmap?,
-        strokes: List<AnnotationStroke>,
-        laserState: LaserPointerState,
-        isBlackout: Boolean
-    ) {
-        pendingBitmap = bitmap
-        pendingStrokes = strokes
-        pendingLaser = laserState
-        pendingBlackout = isBlackout
-        stageView?.updateStage(bitmap, strokes, laserState, isBlackout)
+    fun render(state: ProjectorRenderState) {
+        pendingState = state
+        stageView?.updateStage(state)
     }
 }
